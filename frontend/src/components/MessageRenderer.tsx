@@ -24,7 +24,12 @@ import {
   splitTextWithMarkdownTables,
 } from '../utils/markdownTables';
 import { normalizeChatInlineHtml, extractPreservedHtmlBlocks } from '../utils/chatInlineHtml';
-import { extractChatMath, type ChatMathBlock } from '../utils/chatMath';
+import {
+  extractChatMath,
+  protectMathPlaceholders,
+  restoreRegions,
+  type ChatMathBlock,
+} from '../utils/chatMath';
 import Editor, { loader } from '@monaco-editor/react';
 import * as XLSX from 'xlsx';
 import CodeSelectionMenu from './CodeSelectionMenu';
@@ -1110,28 +1115,27 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
     cellText: string,
   ): { text: string; mathBlocks: ChatMathBlock[] } => {
     const extracted = extractChatMath(cellText);
-    let processed = extracted.text;
+    const ph = protectMathPlaceholders(extracted.text);
+    let processed = ph.text;
 
-    // Обрабатываем жирный текст
-    processed = processed.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-    processed = processed.replace(/__(.*?)__/g, '<strong>$1</strong>');
+    // Callbacks — не '$1'/'$2': иначе JS replace съедает `$…` в теле / плейсхолдерах.
+    processed = processed.replace(/\*\*(.*?)\*\*/g, (_m, body: string) => `<strong>${body}</strong>`);
+    processed = processed.replace(/__(.*?)__/g, (_m, body: string) => `<strong>${body}</strong>`);
 
-    // Обрабатываем курсив
-    processed = processed.replace(/\*(.*?)\*/g, '<em>$1</em>');
-    processed = processed.replace(/_(.*?)_/g, '<em>$1</em>');
+    processed = processed.replace(/\*(.*?)\*/g, (_m, body: string) => `<em>${body}</em>`);
+    processed = processed.replace(/_(.*?)_/g, (_m, body: string) => `<em>${body}</em>`);
 
-    // Обрабатываем зачеркнутый текст
-    processed = processed.replace(/~~(.*?)~~/g, '<del>$1</del>');
+    processed = processed.replace(/~~(.*?)~~/g, (_m, body: string) => `<del>${body}</del>`);
 
-    // Обрабатываем инлайн код
-    processed = processed.replace(/`([^`]+)`/g, '<code>$1</code>');
+    processed = processed.replace(/`([^`]+)`/g, (_m, code: string) => `<code>${code}</code>`);
 
-    // Обрабатываем ссылки
     processed = processed.replace(
       /\[([^\]]+)\]\(([^)]+)\)/g,
-      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
+      (_m, label: string, href: string) =>
+        `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`,
     );
 
+    processed = restoreRegions(processed, ph.regions, ph.tokenPrefix);
     return { text: processed, mathBlocks: extracted.blocks };
   };
 
@@ -1889,60 +1893,80 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
 
     // Списки — ДО курсива через *, иначе маркеры «* пункт» на соседних строках
     // схлопываются в один <em> и только последний «- пункт» остаётся в <ul>.
-    text = text.replace(/^[\s]*(\d+)\.\s+(.+)$/gim, '<li data-list-type="ordered" data-list-number="$1">$2</li>');
-    text = text.replace(/^[\s]*[-*+]\s+(.+)$/gim, '<li data-list-type="unordered">$1</li>');
+    // Callbacks (не '$1'/'$2'): иначе JS replace съедает `$0$`/`$1$` в теле пункта.
+    text = text.replace(/^[\s]*(\d+)\.\s+(.+)$/gim, (_m, num: string, body: string) =>
+      `<li data-list-type="ordered" data-list-number="${num}">${body}</li>`,
+    );
+    text = text.replace(/^[\s]*[-*+]\s+(.+)$/gim, (_m, body: string) =>
+      `<li data-list-type="unordered">${body}</li>`,
+    );
+
+    // Плейсхолдеры KaTeX: `%%ASTRA_MATH_0%%` содержит `MATH_0`, и subscript
+    // `(\w+)_(\d+)` превращал их в `%%ASTRAMATH<sub>0</sub>%%` — формулы не рендерились.
+    const mathPh = protectMathPlaceholders(text);
+    text = mathPh.text;
 
     // Обрабатываем вложенные форматирования правильно
     // Сначала обрабатываем самые внешние теги (жирный), потом внутренние (курсив)
     // Используем жадное совпадение для внешних тегов
     
     // Обрабатываем жирный текст с возможным вложенным курсивом: **текст *курсив* текст**
-    text = text.replace(/\*\*([^*]*(?:\*[^*]+\*[^*]*)*)\*\*/g, (match, content) => {
-      // Обрабатываем курсив внутри жирного
-      const processed = content.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    text = text.replace(/\*\*([^*]*(?:\*[^*]+\*[^*]*)*)\*\*/g, (_match, content: string) => {
+      const processed = content.replace(/\*([^*]+)\*/g, (_m2, inner: string) => `<em>${inner}</em>`);
       return `<strong>${processed}</strong>`;
     });
     
     // Обрабатываем жирный с __
-    text = text.replace(/__([^_]*(?:_[^_]+_[^_]*)*)__/g, (match, content) => {
-      const processed = content.replace(/_([^_]+)_/g, '<em>$1</em>');
+    text = text.replace(/__([^_]*(?:_[^_]+_[^_]*)*)__/g, (_match, content: string) => {
+      const processed = content.replace(/_([^_]+)_/g, (_m2, inner: string) => `<em>${inner}</em>`);
       return `<strong>${processed}</strong>`;
     });
     
     // Обрабатываем оставшийся курсив (который не внутри жирного); не через перенос строки
-    text = text.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+    text = text.replace(/\*([^*\n]+)\*/g, (_m, body: string) => `<em>${body}</em>`);
     // Применяем "_" как курсив только на границах слова,
     // чтобы не ломать snake_case (например, df_date).
-    text = text.replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, '$1<em>$2</em>');
+    text = text.replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, (_m, before: string, body: string) =>
+      `${before}<em>${body}</em>`,
+    );
 
     // Обрабатываем зачеркнутый текст
-    text = text.replace(/~~(.*?)~~/g, '<del>$1</del>');
+    text = text.replace(/~~(.*?)~~/g, (_m, body: string) => `<del>${body}</del>`);
 
     // Обрабатываем подчеркнутый текст (Markdown не поддерживает, но может быть в HTML)
-    text = text.replace(/<u>(.*?)<\/u>/g, '<u>$1</u>');
-    text = text.replace(/<U>(.*?)<\/U>/g, '<u>$1</u>');
+    text = text.replace(/<u>(.*?)<\/u>/gi, (_m, body: string) => `<u>${body}</u>`);
 
     // Обрабатываем верхние индексы (superscript) для формул
-    text = text.replace(/(\w+)\^(\d+)/g, '$1<sup>$2</sup>');
-    text = text.replace(/(\w+)²/g, '$1<sup>2</sup>');
-    text = text.replace(/(\w+)³/g, '$1<sup>3</sup>');
-    text = text.replace(/(\w+)¹/g, '$1<sup>1</sup>');
-    text = text.replace(/(\w+)⁰/g, '$1<sup>0</sup>');
+    text = text.replace(/(\w+)\^(\d+)/g, (_m, base: string, exp: string) =>
+      `${base}<sup>${exp}</sup>`,
+    );
+    text = text.replace(/(\w+)²/g, (_m, base: string) => `${base}<sup>2</sup>`);
+    text = text.replace(/(\w+)³/g, (_m, base: string) => `${base}<sup>3</sup>`);
+    text = text.replace(/(\w+)¹/g, (_m, base: string) => `${base}<sup>1</sup>`);
+    text = text.replace(/(\w+)⁰/g, (_m, base: string) => `${base}<sup>0</sup>`);
 
     // Обрабатываем нижние индексы (subscript)
-    text = text.replace(/(\w+)_(\d+)/g, '$1<sub>$2</sub>');
+    text = text.replace(/(\w+)_(\d+)/g, (_m, base: string, sub: string) =>
+      `${base}<sub>${sub}</sub>`,
+    );
 
     // Обрабатываем ссылки
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, href: string) =>
+      `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`,
+    );
 
     // Обрабатываем изображения
-    text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width: 100%; height: auto;" />');
+    text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt: string, src: string) =>
+      `<img src="${src}" alt="${alt}" style="max-width: 100%; height: auto;" />`,
+    );
 
     // Обрабатываем инлайн код
-    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+    text = text.replace(/`([^`]+)`/g, (_m, code: string) => `<code>${code}</code>`);
 
     // Обрабатываем цитаты
-    text = text.replace(/^>\s+(.+)$/gim, '<blockquote>$1</blockquote>');
+    text = text.replace(/^>\s+(.+)$/gim, (_m, body: string) => `<blockquote>${body}</blockquote>`);
+
+    text = restoreRegions(text, mathPh.regions, mathPh.tokenPrefix);
 
     // Обрабатываем горизонтальные линии
     text = text.replace(/^---$/gim, '<hr>');
@@ -2018,7 +2042,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
         const currentListType = listTypeMatch ? (listTypeMatch[1] as 'ordered' | 'unordered') : 'unordered';
         const listNumberMatch = line.match(/data-list-number="(\d+)"/);
         const originalNumber = listNumberMatch ? parseInt(listNumberMatch[1], 10) : null;
-        const content = line.replace(/<li[^>]*>(.*?)<\/li>/, '$1');
+        const liBodyMatch = line.match(/<li[^>]*>([\s\S]*?)<\/li>/);
+        const content = liBodyMatch ? liBodyMatch[1] : line;
         
         // Для нумерованных списков используем сохраненный номер или продолжаем счетчик
         let listItemValue: number | undefined = undefined;
@@ -2140,7 +2165,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
       }
 
       if (line.startsWith('<blockquote>')) {
-        const content = line.replace(/<blockquote>(.*?)<\/blockquote>/, '$1');
+        const bqMatch = line.match(/<blockquote>([\s\S]*?)<\/blockquote>/);
+        const content = bqMatch ? bqMatch[1] : line;
         return (
           <Box
             key={`${index}-${lineIndex}`}

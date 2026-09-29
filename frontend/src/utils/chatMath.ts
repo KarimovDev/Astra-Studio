@@ -48,25 +48,48 @@ function escapeCurrencyDollars(text: string, replacement: string): string {
   return s;
 }
 
-function protectRegions(
+/**
+ * Временные токены для защиты фрагментов от markdown-трансформов.
+ * Без `_` перед цифрой (иначе `(\w+)_(\d+)` → subscript) и без `\0` (иначе «тофу» в UI).
+ */
+function protectToken(prefix: string, index: number): string {
+  return `%%${prefix}${index}%%`;
+}
+
+export function protectRegions(
   text: string,
   pattern: RegExp,
-): { text: string; regions: string[] } {
+  tokenPrefix = 'ASTRA_PROT',
+): { text: string; regions: string[]; tokenPrefix: string } {
   const regions: string[] = [];
   const next = text.replace(pattern, (block) => {
-    const token = `\u0000ASTRA_PROT_${regions.length}\u0000`;
+    const token = protectToken(tokenPrefix, regions.length);
     regions.push(block);
     return token;
   });
-  return { text: next, regions };
+  return { text: next, regions, tokenPrefix };
 }
 
-function restoreRegions(text: string, regions: string[]): string {
+export function restoreRegions(
+  text: string,
+  regions: string[],
+  tokenPrefix = 'ASTRA_PROT',
+): string {
   let out = text;
-  regions.forEach((block, i) => {
-    out = out.split(`\u0000ASTRA_PROT_${i}\u0000`).join(block);
-  });
+  // С конца: чтобы `PROT10` не перепутать с префиксом `PROT1`.
+  for (let i = regions.length - 1; i >= 0; i -= 1) {
+    out = out.split(protectToken(tokenPrefix, i)).join(regions[i]);
+  }
   return out;
+}
+
+/** Прятать `%%ASTRA_MATH_N%%` от markdown (`MATH_0` → subscript и т.п.). */
+export function protectMathPlaceholders(text: string): {
+  text: string;
+  regions: string[];
+  tokenPrefix: string;
+} {
+  return protectRegions(text, /%%ASTRA_MATH_\d+%%/g, 'ASTRA_MPKEEP');
 }
 
 function pushMath(
@@ -90,9 +113,9 @@ export function extractChatMath(raw: string): { text: string; blocks: ChatMathBl
 
   const blocks: ChatMathBlock[] = [];
 
-  // 1) Code fences / inline code
-  const fences = protectRegions(raw, /```[\s\S]*?(?:```|$)/g);
-  const inlines = protectRegions(fences.text, /`[^`\n]+`/g);
+  // 1) Code fences / inline code (разные префиксы токенов — без коллизий индексов)
+  const fences = protectRegions(raw, /```[\s\S]*?(?:```|$)/g, 'ASTRA_FENCE');
+  const inlines = protectRegions(fences.text, /`[^`\n]+`/g, 'ASTRA_INLINE');
   let s = inlines.text;
 
   // 2) Display math ДО валюты ($$ не пересекается с $100)
@@ -111,8 +134,8 @@ export function extractChatMath(raw: string): { text: string; blocks: ChatMathBl
   );
 
   s = s.split(CURRENCY_TOKEN).join('$');
-  s = restoreRegions(s, inlines.regions);
-  s = restoreRegions(s, fences.regions);
+  s = restoreRegions(s, inlines.regions, inlines.tokenPrefix);
+  s = restoreRegions(s, fences.regions, fences.tokenPrefix);
 
   return { text: s, blocks };
 }
@@ -143,10 +166,10 @@ export function renderKatexHtml(latex: string, displayMode: boolean): string {
 export function preprocessArtifactLatex(content: string): string {
   if (!content || !content.includes('$')) return content;
 
-  const fences = protectRegions(content, /```[\s\S]*?(?:```|$)/g);
-  const inlines = protectRegions(fences.text, /`[^`\n]+`/g);
+  const fences = protectRegions(content, /```[\s\S]*?(?:```|$)/g, 'ASTRA_FENCE');
+  const inlines = protectRegions(fences.text, /`[^`\n]+`/g, 'ASTRA_INLINE');
   let s = escapeCurrencyDollars(inlines.text, '\\$');
-  s = restoreRegions(s, inlines.regions);
-  s = restoreRegions(s, fences.regions);
+  s = restoreRegions(s, inlines.regions, inlines.tokenPrefix);
+  s = restoreRegions(s, fences.regions, fences.tokenPrefix);
   return s;
 }
