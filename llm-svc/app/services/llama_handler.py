@@ -396,21 +396,28 @@ class LlamaHandler(BaseLLMHandler):
         )
         start_time = time.time()
 
-        async with slot.gen_lock:
-            if stream:
-                stream_result = await self._try_create_completion(
-                    slot.llama,
-                    messages,
-                    temperature,
-                    max_tokens,
-                    stream=True,
-                    enable_thinking=enable_thinking,
-                )
-
-                async def stream_generator():
+        # llama.cpp НЕ потокобезопасен: gen_lock нужно держать на ВСЁ время
+        # стрима. Раньше lock отпускался сразу после return generator — и второй
+        # запрос (follow-up suggestions) заходил в тот же Llama → SIGSEGV (exit 139).
+        if stream:
+            async def stream_generator():
+                async with slot.gen_lock:
+                    stream_result = await self._try_create_completion(
+                        slot.llama,
+                        messages,
+                        temperature,
+                        max_tokens,
+                        stream=True,
+                        enable_thinking=enable_thinking,
+                    )
+                    logger.info(
+                        f"Stream [{slot_id}] started in {time.time() - start_time:.2f}s"
+                    )
                     try:
                         while True:
-                            chunk = await self._run_in_executor(lambda: next(stream_result, None))
+                            chunk = await self._run_in_executor(
+                                lambda: next(stream_result, None)
+                            )
                             if chunk is None:
                                 break
                             yield f"data: {json.dumps(chunk)}\n\n"
@@ -428,8 +435,9 @@ class LlamaHandler(BaseLLMHandler):
                     finally:
                         yield "data: [DONE]\n\n"
 
-                logger.info(f"Stream [{slot_id}] started in {time.time() - start_time:.2f}s")
-                return stream_generator()
+            return stream_generator()
+
+        async with slot.gen_lock:
             response = await self._try_create_completion(
                 slot.llama,
                 messages,
