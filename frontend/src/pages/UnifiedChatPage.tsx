@@ -1917,14 +1917,8 @@ export default function UnifiedChatPage({
 
   const visibleMessages = useMemo(() => {
     return messages.filter((message) => {
-      const isMediaGenStreamingPlaceholder =
-        message.role === 'assistant' &&
-        (message.isImageGenerating || message.isVideoGenerating) &&
-        message.isStreaming &&
-        !message.inlineAttachments?.length &&
-        !message.content.trim();
-      if (isMediaGenStreamingPlaceholder) return false;
-
+      // Плейсхолдер генерации изображения/видео (isImageGenerating / isVideoGenerating)
+      // специально оставляем видимым — в MessageCard рисуется ImageGenerationPlaceholder.
       const isEmptyAssistantPlaceholder =
         message.role === 'assistant' &&
         !message.content.trim() &&

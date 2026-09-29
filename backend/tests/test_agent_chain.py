@@ -3,28 +3,21 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import unittest
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-
-def _load_chain():
-    path = _ROOT / "backend" / "agents" / "chain.py"
-    spec = importlib.util.spec_from_file_location("agent_chain_ut", path)
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["agent_chain_ut"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+from backend.agents import chain  # noqa: E402
 
 
 class TestAgentChain(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.chain = _load_chain()
+        cls.chain = chain
 
     def test_parse_agent_ids_filters_self_dupes_and_limit(self):
         raw = [1, "2", 2, "x", 0, -3, 1, *range(10, 30)]

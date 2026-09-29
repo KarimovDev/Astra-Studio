@@ -26,7 +26,8 @@ from backend.agents.step_debug import (
     log_tool_call,
     log_tool_result,
 )
-from backend.agents.subagents import NATIVE_SERVER_ID, execute_native_tool
+from backend.agents.subagents.parent import run_native_tool_call, subagent_call_args
+from backend.agents.subagents.settings import NATIVE_SERVER_ID
 from backend.mcp.types import AgentLoopResult, McpCallContext, McpToolInfo
 from backend.settings.config import get_settings
 from backend.settings.logging import get_logger
@@ -39,7 +40,13 @@ DEFAULT_PROMPT_TEMPLATE = 'Available Tools: {{TOOLS}}\n\nYour task is to choose 
 def _render_tools_prompt(tools: List[McpToolInfo]) -> str:
     specs = []
     for tool in tools:
-        specs.append({"name": tool.qualified_name, "description": tool.description, "parameters": tool.parameters})
+        specs.append(
+            {
+                "name": tool.qualified_name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            }
+        )
     tools_json = json.dumps(specs, ensure_ascii=False)
     return DEFAULT_PROMPT_TEMPLATE.replace("{{TOOLS}}", tools_json)
 
@@ -82,7 +89,9 @@ async def run_prompt_json_fc(
     subagent_config=None,
 ) -> AgentLoopResult:
     settings = get_settings()
-    effective_model_path = fc_model_path or model_path or settings.mcp.fc_task_model or model_path
+    effective_model_path = (
+        fc_model_path or model_path or settings.mcp.fc_task_model or model_path
+    )
     registry = await get_registry()
     provider, model_id = registry.resolve(effective_model_path)
     if not model_id:
@@ -94,6 +103,8 @@ async def run_prompt_json_fc(
             user_query = str(msg.get("content") or "")
             break
     tool_calls_executed = 0
+    # Толчок «задача, вероятно, не закончена» - не больше одного раза за ход.
+    nudged = False
     attachments: List[Dict[str, str]] = []
     working_messages = list(messages)
     req_extra = dict(request_extra or {})
@@ -119,7 +130,11 @@ async def run_prompt_json_fc(
         )
         t_llm = time.perf_counter()
         result = await provider.chat_completion(
-            fc_messages, model_id, temperature=temperature, max_tokens=max_tokens, request_extra=req_extra
+            fc_messages,
+            model_id,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            request_extra=req_extra,
         )
         llm_ms = int((time.perf_counter() - t_llm) * 1000)
         payload = _extract_json_object(result.content)
@@ -144,6 +159,7 @@ async def run_prompt_json_fc(
                 tool_calls_executed=tool_calls_executed,
                 mode="prompt_json_fc",
                 iterations=step,
+                new_messages=working_messages[len(messages) :],
             )
         calls = payload.get("tool_calls") or []
         if not calls:
@@ -154,7 +170,14 @@ async def run_prompt_json_fc(
                 content_preview=result.content or "",
                 duration_ms=llm_ms,
             )
-            if tool_calls_executed > 0 and step < limit:
+            # Раньше толчок срабатывал на каждом шаге без вызовов: модель
+            # говорила «готово», ей отвечали «вероятно, не закончено» - и так
+            # до лимита шагов. Маленькая модель на это вызывает инструменты
+            # заново: 25.09 оба проверочных субагента отработали по два раза.
+            # Один толчок сохраняет смысл (экспорт после поиска и т.п.), дальше
+            # слово модели «готово» - окончательное.
+            if tool_calls_executed > 0 and step < limit and not nudged:
+                nudged = True
                 working_messages.append(
                     {
                         "role": "user",
@@ -171,7 +194,11 @@ async def run_prompt_json_fc(
             )
             t_final = time.perf_counter()
             final = await provider.chat(
-                working_messages, model_id, temperature=temperature, max_tokens=max_tokens, request_extra=req_extra
+                working_messages,
+                model_id,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                request_extra=req_extra,
             )
             content = append_download_links_to_content(final, attachments)
             log_llm_result(
@@ -195,6 +222,7 @@ async def run_prompt_json_fc(
                 mode="prompt_json_fc",
                 iterations=step,
                 attachments=attachments,
+                new_messages=working_messages[len(messages) :],
             )
         call_names = [str(c.get("name") or "") for c in calls if isinstance(c, dict)]
         log_llm_result(
@@ -223,9 +251,14 @@ async def run_prompt_json_fc(
                 tool_results.append(f"Tool {name} not found")
                 continue
             if tool_info.server_id == NATIVE_SERVER_ID:
+                # Над try: в except они нужны для tool_end, а внутри try могли
+                # бы остаться неопределёнными.
                 started = time.perf_counter()
                 call_id = uuid.uuid4().hex
                 tool_args = params if isinstance(params, dict) else {}
+                tool_args = subagent_call_args(
+                    tool_info, tool_args, subagent_ctx, subagent_config
+                )
                 try:
                     log_tool_call(
                         step=step,
@@ -243,13 +276,14 @@ async def run_prompt_json_fc(
                         call_id=call_id,
                         arguments=tool_args,
                     )
-                    content = await execute_native_tool(
+                    # Модели - с меткой [[ОТВЕТ N]], в UI (result=content) - без.
+                    for_model, content, doc_search = await run_native_tool_call(
                         tool_info,
                         tool_args,
                         subagent_ctx=subagent_ctx,
                         subagent_config=subagent_config,
                     )
-                    tool_results.append(content)
+                    tool_results.append(for_model)
                     tool_calls_executed += 1
                     duration_ms = int((time.perf_counter() - started) * 1000)
                     log_tool_result(
@@ -270,6 +304,7 @@ async def run_prompt_json_fc(
                         call_id=call_id,
                         arguments=tool_args,
                         result=content,
+                        document_search=doc_search,
                     )
                 except Exception as exc:
                     log.exception("Native tool error in prompt_json_fc")
@@ -281,6 +316,8 @@ async def run_prompt_json_fc(
                         error=str(exc),
                     )
                     tool_results.append(f"Native tool error: {exc}")
+                    # Без tool_end карточка инструмента в UI остаётся
+                    # «в работе» навсегда. Нативный режим это делает сам.
                     await emit_mcp_tool_end(
                         event_callback,
                         server_id=tool_info.server_id,
@@ -302,7 +339,9 @@ async def run_prompt_json_fc(
                     success=False,
                     error=f"MCP session for {tool_info.server_id} unavailable",
                 )
-                tool_results.append(f"MCP session for {tool_info.server_id} unavailable")
+                tool_results.append(
+                    f"MCP session for {tool_info.server_id} unavailable"
+                )
                 continue
             try:
                 started = time.perf_counter()
@@ -324,7 +363,9 @@ async def run_prompt_json_fc(
                     call_id=call_id,
                     arguments=tool_args,
                 )
-                raw = await platform.call_tool(tool_info.server_id, tool_info.name, tool_args, context, session)
+                raw = await platform.call_tool(
+                    tool_info.server_id, tool_info.name, tool_args, context, session
+                )
                 parsed = parse_mcp_result_to_struct(raw)
                 tool_results.append(format_parsed_for_llm(parsed) or str(raw))
                 tool_calls_executed += 1
@@ -360,7 +401,11 @@ async def run_prompt_json_fc(
                 )
             except Exception as exc:
                 log.exception("Error calling")
-                duration_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else 0
+                duration_ms = (
+                    int((time.perf_counter() - started) * 1000)
+                    if "started" in locals()
+                    else 0
+                )
                 log_tool_result(
                     step=step,
                     limit=limit,
@@ -382,8 +427,15 @@ async def run_prompt_json_fc(
                     result=str(exc),
                 )
                 tool_results.append(f"Error calling {name}: {exc}")
-        working_messages.append({"role": "assistant", "content": json.dumps({"tool_calls": calls}, ensure_ascii=False)})
-        working_messages.append({"role": "user", "content": "Tool results:\n" + "\n".join(tool_results)})
+        working_messages.append(
+            {
+                "role": "assistant",
+                "content": json.dumps({"tool_calls": calls}, ensure_ascii=False),
+            }
+        )
+        working_messages.append(
+            {"role": "user", "content": "Tool results:\n" + "\n".join(tool_results)}
+        )
     log_llm_call(
         step=limit,
         limit=limit,
@@ -393,7 +445,11 @@ async def run_prompt_json_fc(
     )
     t_final = time.perf_counter()
     final = await provider.chat(
-        working_messages, model_id, temperature=temperature, max_tokens=max_tokens, request_extra=req_extra
+        working_messages,
+        model_id,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        request_extra=req_extra,
     )
     content = append_download_links_to_content(final, attachments)
     log_llm_result(
@@ -417,4 +473,5 @@ async def run_prompt_json_fc(
         mode="prompt_json_fc",
         iterations=max_iterations,
         attachments=attachments,
+        new_messages=working_messages[len(messages) :],
     )

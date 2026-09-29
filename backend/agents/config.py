@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional
 
-from backend.agents.chain import get_agent_graph_steps
+from backend.agents.chain.settings import get_agent_graph_steps
 
 DEFAULT_RECURSION_LIMIT = 50
 MAX_RECURSION_LIMIT_CAP = 500

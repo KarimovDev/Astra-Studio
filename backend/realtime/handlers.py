@@ -81,6 +81,7 @@ from backend.settings.logging import get_logger
 from backend.settings.logging.errors import logged_suppress
 from backend.mcp.resolvers import resolve_chat_tool_ids
 from backend.agents.config import resolve_recursion_limit
+from backend.agents.subagents.artifacts import carry_subagent_artifacts
 from backend.agents.step_debug import (
     describe_limit_source,
     log_chain_hop,
@@ -473,119 +474,6 @@ def _build_user_inline_attachments_metadata(raw: Any, inline_context: str = "") 
         meta["inline_context"] = ctx
     return meta or None
 
-
-def _subagent_artifact_blocks(result) -> list:
-    """Все :::artifact-блоки из ответа субагента, включая незакрытые.
-
-    Модель ставит закрывающий code-fence и забывает про :::. Рендер в её
-    собственном чате это прощает, строгая регулярка - нет: блок терялся, и
-    родитель пересказывал слайды текстом. Незакрытый блок берём до следующего
-    заголовка или до конца ответа и закрываем сами (и fence, если открыт).
-    Голый html-документ в fence без заголовка заворачиваем в text/html.
-    """
-    import hashlib
-    import re
-
-    fence = chr(96) * 3
-    text = str(result or "")
-    if not text.strip():
-        return []
-    header_re = re.compile(r":::artifact\{[^}\n]*\}")
-    close_re = re.compile(r"\n:::[ \t]*(?:\n|$)")
-    ident_re = re.compile(r"identifier=[\"']([^\"']+)[\"']")
-    heads = list(header_re.finditer(text))
-    blocks: list = []
-    for i, h in enumerate(heads):
-        stop = heads[i + 1].start() if i + 1 < len(heads) else len(text)
-        m = close_re.search(text, h.end(), stop)
-        if m:
-            blocks.append(text[h.start() : m.end()].strip())
-            continue
-        body = text[h.start() : stop].rstrip()
-        fences = sum(1 for ln in body.splitlines() if ln.strip().startswith(fence))
-        if fences % 2:
-            body += "\n" + fence
-        im = ident_re.search(h.group(0))
-        logger.info(
-            "[subagent] артефакт %s без закрывающего :::, закрыт принудительно",
-            im.group(1) if im else "?",
-        )
-        blocks.append(body + "\n:::")
-    if blocks:
-        return blocks
-    fence_re = re.compile(fence + r"html[ \t]*\n([\s\S]*?)\n" + fence, re.IGNORECASE)
-    for fm in fence_re.finditer(text):
-        html = fm.group(1)
-        low = html.lstrip().lower()
-        if not (low.startswith("<!doctype html") or low.startswith("<html")):
-            continue
-        tm = re.search(r"<title>([^<]{1,120})</title>", html, re.IGNORECASE)
-        title = ((tm.group(1).strip() if tm else "") or "HTML-документ субагента").replace('"', "'")
-        ident = "subagent-html-" + hashlib.md5(html.encode("utf-8", "ignore")).hexdigest()[:8]
-        logger.info("[subagent] html-документ от субагента без :::artifact обёрнут в %s", ident)
-        blocks.append(
-            ':::artifact{identifier="' + ident + '" type="text/html" title="' + title + '"}\n'
-            + fence + "html\n" + html + "\n" + fence + "\n:::"
-        )
-    return blocks
-
-
-def _carry_subagent_artifacts(response, mcp_tool_events) -> str:
-    """Артефакты и файлы из ответов субагентов - в итоговый ответ родителя.
-
-    Ребёнок отдаёт :::artifact-блок (схема, презентация, график) и ссылки на
-    файлы текстом tool-результата; родитель их пересказывает, и до рендера
-    они не доходят. Блоки, чьего identifier в ответе нет, дописываем в конец
-    как есть; ссылки, которых в ответе нет, - блоком «Файлы:». Воспроизвёл
-    родитель сам - второго не будет.
-    """
-    text = str(response or "")
-    try:
-        import re
-
-        if not mcp_tool_events:
-            return text
-        ident_re = re.compile(r"identifier=[\"']([^\"']+)[\"']")
-        have = set(ident_re.findall(text))
-        extra: list = []
-        links: list = []
-        seen_urls: set = set()
-        for ev in mcp_tool_events:
-            if not isinstance(ev, dict) or ev.get("type") != "mcp_tool_end":
-                continue
-            if ev.get("tool") == "subagent":
-                for block in _subagent_artifact_blocks(ev.get("result")):
-                    m = ident_re.search(block)
-                    ident = m.group(1) if m else block
-                    if ident in have:
-                        continue
-                    have.add(ident)
-                    extra.append(block.strip())
-            for link in ev.get("download_urls") or []:
-                if not isinstance(link, dict):
-                    continue
-                url = str(link.get("url") or "")
-                if url and url not in text and url not in seen_urls:
-                    seen_urls.add(url)
-                    links.append(dict(link))
-        if not extra and not links:
-            return text
-        out = text
-        if extra:
-            out = (out.rstrip() + "\n\n" + "\n\n".join(extra)).strip()
-        if links:
-            from backend.mcp.result_parser import append_download_links_to_content
-
-            out = append_download_links_to_content(out, links)
-        logger.info(
-            "[subagent] в ответ родителя добавлено: артефактов=%s файлов=%s",
-            len(extra),
-            len(links),
-        )
-        return out
-    except Exception:
-        logger.debug("[subagent] не удалось перенести артефакты", exc_info=True)
-        return text
 
 
 async def _handle_chat_image_generation_request(
@@ -1243,7 +1131,9 @@ def register_handlers(sio):
                     generation_started_at=generation_t0,
                 )
                 return
-            await _run_direct_or_chain(
+            from backend.agents.chain.runner import run_direct_or_chain
+
+            await run_direct_or_chain(
                 sio,
                 sid,
                 data,
@@ -1707,7 +1597,7 @@ async def _handle_multi_llm(
                         ),
                     )
                     if mcp_result is not None:
-                        resp = _carry_subagent_artifacts(mcp_result.content or "", _model_events)
+                        resp = carry_subagent_artifacts(mcp_result.content or "", _model_events)
                         if streaming and resp:
                             await sio.emit(
                                 "multi_llm_chunk",
@@ -1852,283 +1742,6 @@ async def _handle_multi_llm(
         logger.exception("Ошибка сохранения агрегированного multi-LLM ответа")
 
 
-
-async def _run_direct_or_chain(
-    sio,
-    sid,
-    data,
-    user_message,
-    streaming,
-    conversation_id,
-    history,
-    use_kb_rag,
-    use_memory_library_rag,
-    agent_profile,
-    sync_stream_cb,
-    loop,
-    use_agent_scoped_kb=False,
-    agent_kb_doc_ids=None,
-    project_id=None,
-    project_instructions=None,
-    rag_strategy="auto",
-    current_user=None,
-    enable_thinking=False,
-    inline_context: str = "",
-    inline_images: list = None,
-    generation_started_at: Optional[float] = None,
-):
-    """Один агент или последовательная цепочка Mixture-of-Agents."""
-    from backend.agents.chain import (
-        build_chain_user_message,
-        format_visible_chain_content,
-        iter_chain_stream_prefixes,
-        prepare_step_socket_data,
-        resolve_agent_chain,
-    )
-
-    user_id = (current_user or {}).get("user_id") if isinstance(current_user, dict) else None
-    chain = await resolve_agent_chain(
-        data.get("agent_id") if isinstance(data, dict) else None,
-        agent_profile,
-        user_id,
-        user=current_user if isinstance(current_user, dict) else None,
-    )
-    if len(chain) <= 1:
-        await _handle_direct(
-            sio,
-            sid,
-            data,
-            user_message,
-            streaming,
-            conversation_id,
-            history,
-            use_kb_rag,
-            use_memory_library_rag,
-            agent_profile,
-            sync_stream_cb,
-            loop,
-            use_agent_scoped_kb,
-            agent_kb_doc_ids,
-            project_id=project_id,
-            project_instructions=project_instructions,
-            rag_strategy=rag_strategy,
-            current_user=current_user,
-            enable_thinking=enable_thinking,
-            inline_context=inline_context,
-            inline_images=inline_images,
-            generation_started_at=generation_started_at,
-        )
-        return
-
-    hide_seq = bool((chain[0] or {}).get("hide_sequential_outputs"))
-    # Общий RAG для цепочки: головной агент (chain[0]) делится своей базой знаний
-    # со всеми последующими агентами. Индивидуальный per-agent RAG при этом не трогаем —
-    # он продолжает работать для одиночных агентов и когда флаг выключен.
-    head_profile = chain[0] or {}
-    shared_chain_rag = bool(head_profile.get("shared_chain_rag"))
-    shared_kb_ids = head_profile.get("kb_document_ids") or []
-    shared_kb_enabled = (
-        shared_chain_rag
-        and bool(head_profile.get("file_search_enabled"))
-        and isinstance(shared_kb_ids, list)
-        and len(shared_kb_ids) > 0
-    )
-    steps: list = []
-    # #теги: фиксируем id в payload первого шага и убираем mentions из текста,
-    # чтобы следующие hop и история не тащили сырой <#id|…>.
-    if isinstance(data, dict):
-        try:
-            from backend.services.tag_mentions import (
-                collect_mention_tag_ids,
-                strip_tag_mentions,
-            )
-
-            mention_tags = collect_mention_tag_ids(
-                user_message=user_message, data=data
-            )
-            if mention_tags:
-                data = dict(data)
-                data["tag_ids"] = mention_tags
-            original_message = strip_tag_mentions(user_message)
-        except Exception:
-            original_message = user_message
-    else:
-        original_message = user_message
-    logger.info(
-        "[шаги агента] Старт цепочки: %s агентов подряд | скрывать промежуточные=%s | "
-        "id=%s | чат=%s (это смена агентов, не лимит шагов LLM↔инструменты)",
-        len(chain),
-        hide_seq,
-        [p.get("agent_id") for p in chain],
-        conversation_id,
-    )
-    logger.debug(
-        "[agent-chain] start n=%s hide_sequential=%s ids=%s",
-        len(chain),
-        hide_seq,
-        [p.get("agent_id") for p in chain],
-    )
-
-    for i, profile in enumerate(chain):
-        if _generation_stopped(sid):
-            await sio.emit("generation_stopped", _stream_ids_payload({"message": "Генерация остановлена"}), room=sid)
-            return
-        is_first = i == 0
-        is_last = i == len(chain) - 1
-        step_name = (profile.get("name") or "Агент").strip() or "Агент"
-        step_kb_ids_peek = profile.get("kb_document_ids") or []
-        step_use_kb_peek = (
-            bool(profile.get("file_search_enabled"))
-            and isinstance(step_kb_ids_peek, list)
-            and len(step_kb_ids_peek) > 0
-        )
-        log_chain_hop(
-            index=i + 1,
-            total=len(chain),
-            agent_id=profile.get("agent_id"),
-            agent_name=step_name,
-            chat_id=conversation_id,
-            has_rag=bool(
-                (use_kb_rag if is_first else False)
-                or use_memory_library_rag
-                or step_use_kb_peek
-                or shared_kb_enabled
-                or project_id
-            ),
-            recursion_limit=resolve_recursion_limit(
-                profile if isinstance(profile, dict) else None
-            ),
-        )
-        await sio.emit(
-            "chat_agent_update",
-            _stream_ids_payload(
-                {
-                    "agent_id": profile.get("agent_id"),
-                    "agent_name": step_name,
-                    "index": i,
-                    "total": len(chain),
-                    "hide_sequential": hide_seq,
-                    "is_last": is_last,
-                }
-            ),
-            room=sid,
-        )
-        if hide_seq and not is_last:
-            await sio.emit(
-                "chat_thinking",
-                _stream_ids_payload(
-                    {
-                        "status": "processing",
-                        "message": f"{step_name} думает…",
-                        "agent_chain": True,
-                    }
-                ),
-                room=sid,
-            )
-
-        step_profile = await enrich_agent_profile_with_user_settings(profile, user_id)
-        _eff_ms = step_profile.get("effective_model_settings") if isinstance(step_profile, dict) else None
-        if isinstance(_eff_ms, dict) and _eff_ms:
-            bind_user_model_runtime(_eff_ms)
-
-        if shared_kb_enabled:
-            # Общая база знаний головного агента для каждого шага цепочки
-            # и субагентов этих шагов (_shared_chain_rag_ids / shared_chain_rag).
-            step_profile = dict(step_profile) if isinstance(step_profile, dict) else {}
-            step_profile["shared_chain_rag"] = True
-            step_profile["_shared_chain_rag_ids"] = list(shared_kb_ids)
-            if not step_profile.get("file_search_enabled"):
-                step_profile["file_search_enabled"] = True
-            step_kb_ids = list(shared_kb_ids)
-            step_use_kb = True
-        else:
-            step_kb_ids = step_profile.get("kb_document_ids") or []
-            step_use_kb = (
-                bool(step_profile.get("file_search_enabled"))
-                and isinstance(step_kb_ids, list)
-                and len(step_kb_ids) > 0
-            )
-        step_data = prepare_step_socket_data(data, step_profile, is_first=is_first)
-        step_message = original_message if is_first else build_chain_user_message(original_message, steps)
-        stream_prefix, _header = iter_chain_stream_prefixes(steps, step_name, hide_sequential_outputs=hide_seq)
-
-        raw = await _handle_direct(
-            sio,
-            sid,
-            step_data,
-            step_message,
-            streaming,
-            conversation_id,
-            history,
-            use_kb_rag if is_first else False,
-            use_memory_library_rag,
-            step_profile,
-            sync_stream_cb,
-            loop,
-            step_use_kb,
-            step_kb_ids,
-            project_id=project_id,
-            project_instructions=project_instructions,
-            rag_strategy=rag_strategy,
-            current_user=current_user,
-            enable_thinking=enable_thinking,
-            inline_context=inline_context if is_first else "",
-            inline_images=inline_images if is_first else None,
-            generation_started_at=generation_started_at,
-            rag_query=original_message,
-            stream_prefix=stream_prefix,
-            emit_complete=False,
-            save_response=False,
-            suppress_ui_stream=hide_seq and not is_last,
-        )
-        if raw is None or _generation_stopped(sid):
-            return
-        step_content = raw.get("content") if isinstance(raw, dict) else raw
-        step_reasoning = raw.get("reasoning") if isinstance(raw, dict) else ""
-        step_document_search = raw.get("document_search") if isinstance(raw, dict) else None
-        steps.append(
-            {
-                "agent_id": profile.get("agent_id"),
-                "agent_name": step_name,
-                "content": step_content or "",
-                "reasoning": step_reasoning or "",
-                "document_search": step_document_search or None,
-            }
-        )
-
-    visible = format_visible_chain_content(steps, hide_sequential_outputs=hide_seq)
-    last_profile = chain[-1]
-    last_name = (last_profile.get("name") or "Агент").strip() or "Агент"
-    payload = _stream_ids_payload(
-        {
-            "response": visible,
-            "timestamp": datetime.now().isoformat(),
-            "was_streaming": streaming,
-            "generation_duration_sec": _generation_duration_sec(generation_started_at),
-            "chain_steps": steps,
-            "hide_sequential_outputs": hide_seq,
-            "agent_id": last_profile.get("agent_id"),
-            "agent_name": last_name,
-        }
-    )
-    await sio.emit("chat_complete", payload, room=sid)
-    try:
-        meta = {
-            "chain_steps": steps,
-            "hide_sequential_outputs": hide_seq,
-        }
-        meta = _with_generation_duration(meta, generation_started_at)
-        regen = _regen_save_kwargs(data)
-        await save_assistant_response(
-            visible,
-            meta,
-            conversation_id=conversation_id,
-            user_id=user_id,
-            project_id=project_id,
-            **regen,
-        )
-    except Exception as e:
-        logger.warning(f"Не удалось сохранить ответ цепочки: {e}")
 
 
 async def _handle_direct(
@@ -2768,8 +2381,7 @@ async def _handle_direct(
         # Возвращает сообщение с их ответами и профиль для цикла инструментов
         # (при required_only - без tool subagent). Без тегов - ничего не делает.
         try:
-            from backend.agents.required_subagents import run_required_subagents
-            from backend.services.tag_mentions import collect_mention_tag_ids
+            from backend.agents.subagents.required import run_required_for_chat
 
             async def _required_event_cb(payload):
                 mcp_tool_events.append(dict(payload))
@@ -2778,58 +2390,24 @@ async def _handle_direct(
                         "chat_mcp_event", _stream_ids_payload(payload), room=sid
                     )
 
-            mention_tags = collect_mention_tag_ids(
-                user_message=str(
-                    (data or {}).get("message") if isinstance(data, dict) else ""
-                )
-                or final_message,
-                data=data if isinstance(data, dict) else None,
-            )
-            logger.info(
-                "[chat-#tag] handlers: mention_tags=%s payload_tag_ids=%s "
-                "raw_message_has_mention=%s parent_agent_id=%s",
-                mention_tags,
-                (data or {}).get("tag_ids") if isinstance(data, dict) else None,
-                "<#"
-                in str((data or {}).get("message") if isinstance(data, dict) else ""),
-                (agent_profile or {}).get("agent_id")
-                if isinstance(agent_profile, dict)
-                else None,
-            )
             (
                 final_message,
                 agent_profile,
                 _required_called,
                 mention_direct_answer,
-            ) = await run_required_subagents(
+            ) = await run_required_for_chat(
+                data=data,
+                final_message=final_message,
                 agent_profile=agent_profile,
-                user_message=final_message,
                 history=history,
-                user=current_user,
-                user_id=(current_user or {}).get("user_id"),
+                current_user=current_user,
                 enable_thinking=enable_thinking,
                 emit_event=_required_event_cb,
                 stopped=lambda: _generation_stopped(sid),
-                inline_attachments=(
-                    data.get("inline_attachments") if isinstance(data, dict) else None
-                ),
-                mention_tag_ids=mention_tags,
             )
             if mention_direct_answer:
                 # #тег без выбранного агента → ответ вызванных агентов сразу в UI.
                 canned = mention_direct_answer
-                logger.info(
-                    "[chat-#tag] handlers: используем прямой ответ агентов "
-                    "(без родительского LLM), called=%s len=%s",
-                    _required_called,
-                    len(mention_direct_answer),
-                )
-            elif _required_called:
-                logger.info(
-                    "[chat-#tag] handlers: ответы агентов вложены в промпт родителя, "
-                    "called=%s",
-                    _required_called,
-                )
         except Exception:
             logger.exception("[chat-#tag] предвызов не удался, отвечаю без него")
     tool_ids = resolve_chat_tool_ids(data.get("tool_ids") or data.get("mcp_tool_ids"))
@@ -2943,6 +2521,9 @@ async def _handle_direct(
                 inline_attachments=(
                     data.get("inline_attachments") if isinstance(data, dict) else None
                 ),
+                # Вопрос дословно, без RAG-контекста final_message: субагент
+                # получает его рядом с заданием родителя.
+                user_question=user_message,
             )
             if mcp_result is None:
                 log_pre_loop(
@@ -3138,7 +2719,7 @@ async def _handle_direct(
     # После всех веток (цикл, стрим, обычный вызов): артефакты и файлы детей,
     # которые родитель пересказал вместо того, чтобы воспроизвести.
     if mcp_tool_events and isinstance(response, str):
-        response = _carry_subagent_artifacts(response, mcp_tool_events)
+        response = carry_subagent_artifacts(response, mcp_tool_events)
     if _generation_stopped(sid):
         await sio.emit("generation_stopped", _stream_ids_payload({"message": "Генерация остановлена"}), room=sid)
         return None

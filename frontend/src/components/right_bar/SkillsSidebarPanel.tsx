@@ -13,6 +13,8 @@ import {
   CircularProgress,
   FormControlLabel,
   IconButton,
+  Menu,
+  MenuItem,
   Popover,
   TextField,
   Tooltip,
@@ -58,11 +60,12 @@ import {
   toggleActiveSkill,
 } from '../../utils/skillSelectionStorage';
 import {
-  exportSkillsJson,
+  exportSkill,
   formatSkillsApiDetail,
   importSkillFile,
   notifySkillsChanged,
   slugifySkillName,
+  type SkillExportFormat,
 } from '../../utils/skillsImportExport';
 import ShareSkillDialog from '../ShareSkillDialog';
 import SkillFilesEditor from '../skills/SkillFilesEditor';
@@ -158,6 +161,7 @@ export default function SkillsSidebarPanel({
   const currentChatId = appState.currentChatId;
   const { showNotification } = useAppActions();
   const importRef = useRef<HTMLInputElement>(null);
+  const [exportMenuAnchor, setExportMenuAnchor] = useState<null | HTMLElement>(null);
 
   const [sidebarColorTick, setSidebarColorTick] = useState(0);
   const panelBg = useMemo(
@@ -647,11 +651,22 @@ export default function SkillsSidebarPanel({
     }
   };
 
-  const handleExport = async () => {
+  const canExportCurrent =
+    Boolean(form.name.trim()) && Boolean(form.content.trim());
+
+  const handleExport = (format: SkillExportFormat) => {
+    setExportMenuAnchor(null);
+    if (!canExportCurrent) {
+      showNotification('error', 'Заполните название и содержимое skill перед экспортом');
+      return;
+    }
     setBusyImportExport(true);
     try {
-      await exportSkillsJson(token);
-      showNotification('success', 'Skills экспортированы');
+      exportSkill(form, format);
+      showNotification(
+        'success',
+        format === 'md' ? 'Skill экспортирован в Markdown' : 'Skill экспортирован в JSON',
+      );
     } catch (e) {
       showNotification('error', e instanceof Error ? e.message : 'Ошибка export');
     } finally {
@@ -660,6 +675,10 @@ export default function SkillsSidebarPanel({
   };
 
   const handleImportFile = async (file: File) => {
+    if (!canEdit) {
+      showNotification('error', 'Нет прав на импорт skill');
+      return;
+    }
     setBusyImportExport(true);
     try {
       const result = await importSkillFile(file, token);
@@ -671,11 +690,19 @@ export default function SkillsSidebarPanel({
         setDetailMeta(null);
         setForm({
           ...emptyForm,
-          name: result.name,
           slug: result.slug,
+          name: result.name,
+          display_title: result.display_title,
           description: result.description,
           content: result.content,
-          display_title: result.name,
+          is_active: result.is_active,
+          is_public: result.is_public,
+          user_invocable: result.user_invocable,
+          disable_model_invocation: result.disable_model_invocation,
+          always_apply: result.always_apply,
+          allowed_tools: result.allowed_tools,
+          category: result.category,
+          tags: result.tags,
         });
         showNotification('info', 'Данные из MD подставлены в форму — сохраните skill');
       }
@@ -1168,18 +1195,20 @@ export default function SkillsSidebarPanel({
         )}
 
         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', width: '100%' }}>
-          <Box component="span" sx={{ flex: '1 1 140px', minWidth: 0, display: 'flex' }}>
-            <Button
-              size="small"
-              fullWidth
-              startIcon={<ImportIcon />}
-              disabled={busyImportExport}
-              onClick={() => importRef.current?.click()}
-              sx={footerNeutralActionBtnSx}
-            >
-              Импорт
-            </Button>
-          </Box>
+          {canEdit ? (
+            <Box component="span" sx={{ flex: '1 1 140px', minWidth: 0, display: 'flex' }}>
+              <Button
+                size="small"
+                fullWidth
+                startIcon={<ImportIcon />}
+                disabled={busyImportExport}
+                onClick={() => importRef.current?.click()}
+                sx={footerNeutralActionBtnSx}
+              >
+                Импорт
+              </Button>
+            </Box>
+          ) : null}
           <Box component="span" sx={{ flex: '1 1 140px', minWidth: 0, display: 'flex' }}>
             <Button
               size="small"
@@ -1191,14 +1220,25 @@ export default function SkillsSidebarPanel({
                   <ExportIcon />
                 )
               }
-              disabled={busyImportExport}
-              onClick={() => void handleExport()}
+              endIcon={<ExpandMoreIcon sx={{ fontSize: 16 }} />}
+              disabled={busyImportExport || !canExportCurrent}
+              onClick={(e) => setExportMenuAnchor(e.currentTarget)}
               sx={footerNeutralActionBtnSx}
             >
               Экспорт
             </Button>
           </Box>
         </Box>
+        <Menu
+          anchorEl={exportMenuAnchor}
+          open={Boolean(exportMenuAnchor)}
+          onClose={() => setExportMenuAnchor(null)}
+          anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
+          transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+        >
+          <MenuItem onClick={() => handleExport('json')}>JSON (.json)</MenuItem>
+          <MenuItem onClick={() => handleExport('md')}>Markdown (.md)</MenuItem>
+        </Menu>
 
         {selectedSkillId !== 'new' && isOwner && (
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', width: '100%' }}>

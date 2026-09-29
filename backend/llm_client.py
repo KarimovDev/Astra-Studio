@@ -182,20 +182,50 @@ def _clean_llm_response(text: str) -> str:
 def _strip_think_tags(text: str) -> str:
     """Удаляет блоки <think>...</think> и незакрытые <think>... из текста.
 
+    Также вырезает «сиротский» закрывающий тег без открывающего
+    (Qwen3.5 / GLM в режиме enable_thinking=False часто пишут reasoning…</think>ответ).
+
     Используется в режиме быстрого ответа (thinking_requested=False), чтобы
     рассуждения модели не попадали в финальный ответ пользователю.
     """
-    if not text or "<think>" not in text.lower():
-        # Qwen3.5: открывающий <think> может быть только в промпте шаблона.
-        if text and "</think>" in text.lower():
-            parts = re.split(r"</think>", text, maxsplit=1, flags=re.IGNORECASE)
-            return (parts[1] if len(parts) > 1 else "").strip()
+    if not text:
         return text
-    # Закрытые блоки
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
-    # Незакрытый блок (модель не успела закрыть тег)
-    text = re.sub(r"<think>[\s\S]*$", "", text, flags=re.IGNORECASE)
+    lower = text.lower()
+    open_l = "<think>".lower()
+    close_l = "</think>".lower()
+    if open_l not in lower and close_l not in lower:
+        return text
+    if open_l in lower:
+        text = re.sub(
+            re.escape("<think>") + r"[\s\S]*?" + re.escape("</think>"),
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            re.escape("<think>") + r"[\s\S]*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+    # Orphan closer: всё до первого </think> включительно — рассуждение.
+    if close_l in text.lower():
+        text = re.sub(
+            r"^[\s\S]*?" + re.escape("</think>"),
+            "",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
     return text.strip()
+
+
+def _has_think_markers(text: str) -> bool:
+    """True, если в тексте есть открывающий или закрывающий think-тег."""
+    if not text:
+        return False
+    lower = text.lower()
+    return "<think>".lower() in lower or "</think>".lower() in lower
 
 
 class _PromptOpenedThinkSplitter:
@@ -1119,6 +1149,11 @@ class LLMService:
                 logger.info(f"История диалога: {len(history)} сообщений передается в LLM")
             messages = self.prepare_messages(prompt, history, system_prompt)
             req_extra = self._thinking_request_extra(enable_thinking)
+            # Поля выборки (top_p, top_k, penalties) доезжают до модели только
+            # отсюда: payload и для потока, и без него собирается из req_extra.
+            from backend.llm_providers.routing import merge_sampling_request_extra
+
+            req_extra = merge_sampling_request_extra(req_extra)
             logger.info(
                 "[generate_response] thinking flag: enable_thinking=%r req_extra=%s",
                 enable_thinking,
@@ -1326,8 +1361,8 @@ class LLMService:
                     thinking_requested = is_thinking_requested(req_extra)
                     if thinking_requested and reasoning and "<think>" not in content:
                         content = f"<think>{reasoning}</think>\n\n{content}"
-                    # Быстрый режим: если модель встроила <think> в content — убираем.
-                    elif not thinking_requested and "<think>" in content.lower():
+                    # Быстрый режим: если модель встроила <think>/</think> в content — убираем.
+                    elif not thinking_requested and _has_think_markers(content):
                         content = _strip_think_tags(content)
                     logger.info(f"[generate_response] Ответ получен ({len(content)} симв.)")
                     return content
@@ -1478,8 +1513,16 @@ class LLMService:
                                                     return prompt_think.finalize_combined()
                                             else:
                                                 accumulated_text += piece
+                                                cb_accumulated = accumulated_text
+                                                if (
+                                                    not thinking_requested
+                                                    and _has_think_markers(accumulated_text)
+                                                ):
+                                                    cb_accumulated = _strip_think_tags(
+                                                        accumulated_text
+                                                    )
                                                 if _invoke_stream_callback_safe(
-                                                    stream_callback, piece, accumulated_text, "content"
+                                                    stream_callback, piece, cb_accumulated, "content"
                                                 ) is False:
                                                     logger.info("[_stream_generation] Прервано колбэком")
                                                     return prompt_think.finalize_combined()
@@ -1511,8 +1554,8 @@ class LLMService:
                     return f"<think>{reasoning_accumulated.strip()}</think>\n\n{cleaned}"
                 return cleaned
             cleaned = _clean_llm_response(accumulated_text)
-            # Быстрый режим: если модель встроила <think> в content — убираем.
-            if "<think>" in cleaned.lower() or "</think>" in cleaned.lower():
+            # Быстрый режим: если модель встроила <think>/</think> в content — убираем.
+            if _has_think_markers(cleaned):
                 return _strip_think_tags(cleaned)
             if reasoning_accumulated.strip() and "<think>" not in cleaned:
                 return f"<think>{reasoning_accumulated.strip()}</think>\n\n{cleaned}"

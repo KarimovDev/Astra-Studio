@@ -29,7 +29,8 @@ from backend.agents.step_debug import (
     log_tool_call,
     log_tool_result,
 )
-from backend.agents.subagents import NATIVE_SERVER_ID, execute_native_tool
+from backend.agents.subagents.parent import run_native_tool_call, subagent_call_args
+from backend.agents.subagents.settings import NATIVE_SERVER_ID
 from backend.mcp.types import AgentLoopResult, McpCallContext, McpToolInfo
 from backend.settings.cef_logger.cef_logger import log_cef_event
 from backend.settings.config import get_settings
@@ -93,6 +94,7 @@ async def emit_mcp_tool_end(
     call_id: Optional[str] = None,
     arguments: Optional[Dict[str, Any]] = None,
     result: Optional[str] = None,
+    document_search: Optional[Dict[str, Any]] = None,
 ) -> None:
     if not callback:
         return
@@ -122,6 +124,8 @@ async def emit_mcp_tool_end(
         payload["has_resource"] = True
     if download_urls:
         payload["download_urls"] = download_urls
+    if document_search:
+        payload["document_search"] = document_search
     await callback(payload)
 
 
@@ -192,7 +196,11 @@ class McpAgentLoop:
             )
             t0 = time.perf_counter()
             content = await provider.chat(
-                messages, model_id, temperature=temperature, max_tokens=max_tokens, request_extra=request_extra
+                messages,
+                model_id,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                request_extra=request_extra,
             )
             log_llm_result(
                 step=1,
@@ -210,7 +218,9 @@ class McpAgentLoop:
                 content_preview=content or "",
             )
             return AgentLoopResult(content=content or "", mode="plain", iterations=1)
-        async with self._platform.request_sessions(enabled_server_ids, mcp_context) as sessions:
+        async with self._platform.request_sessions(
+            enabled_server_ids, mcp_context
+        ) as sessions:
             registry = await get_registry()
             provider, model_id = registry.resolve(model_path)
             if not model_id:
@@ -308,8 +318,9 @@ class McpAgentLoop:
                 )
             except Exception:
                 log.exception("Native MCP FC failed, fallback prompt_json_fc")
-                return await _run_prompt_json_fc(
-                    messages=messages,
+                # С текущей перепиской, а не с входной
+                fallback = await _run_prompt_json_fc(
+                    messages=working,
                     model_path=f"{provider.id}/{model_id}",
                     tools=tools,
                     context=context,
@@ -322,6 +333,11 @@ class McpAgentLoop:
                     subagent_ctx=subagent_ctx,
                     subagent_config=subagent_config,
                 )
+                fallback.tool_calls_executed += tool_calls_executed
+                fallback.new_messages = working[len(messages) :] + list(
+                    fallback.new_messages
+                )
+                return fallback
             llm_ms = int((time.perf_counter() - t_llm) * 1000)
             if not result.tool_calls:
                 if iteration == 0 and content_has_text_tool_calls(result.content or ""):
@@ -363,6 +379,7 @@ class McpAgentLoop:
                     tool_calls_executed=tool_calls_executed,
                     mode="native_openai_tools",
                     iterations=step,
+                    new_messages=working[len(messages) :],
                 )
             tc_names = [tc.name for tc in result.tool_calls]
             log_llm_result(
@@ -382,7 +399,9 @@ class McpAgentLoop:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": __import__("json").dumps(tc.arguments, ensure_ascii=False),
+                            "arguments": __import__("json").dumps(
+                                tc.arguments, ensure_ascii=False
+                            ),
                         },
                     }
                     for tc in result.tool_calls
@@ -399,15 +418,25 @@ class McpAgentLoop:
                         success=False,
                         error="Unknown tool",
                     )
-                    working.append({"role": "tool", "tool_call_id": tc.id, "content": f"Unknown tool: {tc.name}"})
+                    working.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": f"Unknown tool: {tc.name}",
+                        }
+                    )
                     continue
                 session = sessions.get(tool_info.server_id)
                 started = time.perf_counter()
                 call_id = uuid.uuid4().hex
                 tool_args = tc.arguments if isinstance(tc.arguments, dict) else {}
+                tool_args = subagent_call_args(
+                    tool_info, tool_args, subagent_ctx, subagent_config
+                )
                 tool_kind = (
                     "native" if tool_info.server_id == NATIVE_SERVER_ID else "mcp"
                 )
+                native_doc_search = None
                 log_tool_call(
                     step=step,
                     limit=limit,
@@ -425,18 +454,19 @@ class McpAgentLoop:
                     arguments=tool_args,
                 )
                 if tool_info.server_id == NATIVE_SERVER_ID:
+                    native_doc_search = None
                     try:
-                        content = await execute_native_tool(
+                        # Модели - с меткой [[ОТВЕТ N]], в UI (result_ui) - без.
+                        content, result_ui, native_doc_search = await run_native_tool_call(
                             tool_info,
                             tool_args,
                             subagent_ctx=subagent_ctx,
                             subagent_config=subagent_config,
                         )
                         outcome = "success"
-                        preview = (content or "")[:500] or None
+                        preview = (result_ui or "")[:500] or None
                         has_image = has_audio = has_resource = False
                         download_links = None
-                        result_ui = content
                     except Exception as exc:
                         log.exception("Native tool error")
                         content = f"Native tool error: {exc}"
@@ -445,6 +475,7 @@ class McpAgentLoop:
                         has_image = has_audio = has_resource = False
                         download_links = None
                         result_ui = content
+                        native_doc_search = None
                 elif not session:
                     log_tool_result(
                         step=step,
@@ -476,7 +507,11 @@ class McpAgentLoop:
                     )
                     try:
                         raw = await self._platform.call_tool(
-                            tool_info.server_id, tool_info.name, tc.arguments, context, session
+                            tool_info.server_id,
+                            tool_info.name,
+                            tc.arguments,
+                            context,
+                            session,
                         )
                         parsed = parse_mcp_result_to_struct(raw)
                         content = format_parsed_for_llm(parsed) or str(raw)
@@ -485,7 +520,9 @@ class McpAgentLoop:
                         has_image = bool(parsed.images)
                         has_audio = bool(parsed.audio)
                         has_resource = bool(parsed.resources)
-                        download_links = enrich_download_links(parsed, tool_info.server_id)
+                        download_links = enrich_download_links(
+                            parsed, tool_info.server_id
+                        )
                         result_ui = format_tool_result_for_ui(parsed, raw)
                         for link in download_links:
                             if link["url"] not in {x["url"] for x in attachments}:
@@ -535,9 +572,12 @@ class McpAgentLoop:
                     call_id=call_id,
                     arguments=tool_args,
                     result=result_ui if outcome == "success" else content,
+                    document_search=native_doc_search if outcome == "success" else None,
                 )
                 tool_calls_executed += 1
-                working.append({"role": "tool", "tool_call_id": tc.id, "content": content})
+                working.append(
+                    {"role": "tool", "tool_call_id": tc.id, "content": content}
+                )
         log_llm_call(
             step=limit,
             limit=limit,
@@ -547,7 +587,11 @@ class McpAgentLoop:
         )
         t_final = time.perf_counter()
         final = await provider.chat(
-            working, model_id, temperature=temperature, max_tokens=max_tokens, request_extra=req_extra
+            working,
+            model_id,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            request_extra=req_extra,
         )
         content = append_download_links_to_content(final, attachments)
         log_llm_result(
@@ -571,6 +615,7 @@ class McpAgentLoop:
             mode="native_openai_tools",
             iterations=max_iterations,
             attachments=attachments,
+            new_messages=working[len(messages) :],
         )
 
 

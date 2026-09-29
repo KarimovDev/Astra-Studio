@@ -1,74 +1,25 @@
 # -*- coding: utf-8 -*-
-"""Тесты лимитов шагов и субагентов (изолированная загрузка модулей)."""
+"""Тесты лимитов шагов и субагентов."""
 
 from __future__ import annotations
 
-import importlib.util
 import sys
-import types
 import unittest
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict
 
 _ROOT = Path(__file__).resolve().parents[2]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-
-def _load_module(name: str, rel_path: str):
-    path = _ROOT / rel_path
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-@dataclass
-class _StubMcpToolInfo:
-    server_id: str
-    name: str
-    qualified_name: str
-    description: str
-    parameters: Dict[str, Any]
-    raw: Dict[str, Any] = field(default_factory=dict)
-
-
-def _ensure_subagent_import_stubs():
-    mcp_types = types.ModuleType("backend.mcp.types")
-    mcp_types.McpToolInfo = _StubMcpToolInfo
-    sys.modules.setdefault("backend.mcp.types", mcp_types)
-
-    logging_mod = types.ModuleType("backend.settings.logging")
-
-    def _get_logger(_name):
-        class _L:
-            def debug(self, *a, **k):
-                pass
-
-            def exception(self, *a, **k):
-                pass
-
-        return _L()
-
-    logging_mod.get_logger = _get_logger
-    sys.modules.setdefault("backend.settings.logging", logging_mod)
+from backend.agents import config as agent_config  # noqa: E402
+from backend.agents import subagents  # noqa: E402
 
 
 class TestAgentConfig(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.chain = _load_module("agent_chain_cfg_ut", "backend/agents/chain.py")
-        agents_pkg = types.ModuleType("backend.agents")
-        agents_pkg.chain = cls.chain
-        sys.modules.setdefault("backend.agents", agents_pkg)
-        sys.modules["backend.agents.chain"] = cls.chain
-        cls.config = _load_module("agent_config_ut", "backend/agents/config.py")
-        sys.modules["backend.agents.config"] = cls.config
-        _ensure_subagent_import_stubs()
-        cls.subagents = _load_module(
-            "agent_subagents_ut", "backend/agents/subagents.py"
-        )
+        cls.config = agent_config
+        cls.subagents = subagents
 
     def test_resolve_recursion_limit_per_agent(self):
         got = self.config.resolve_recursion_limit({"recursion_limit": 30})
@@ -121,7 +72,8 @@ class TestAgentConfig(unittest.TestCase):
         self.assertEqual(tools[0].name, "subagent")
         enum_values = tools[0].parameters["properties"]["subagent_type"]["enum"]
         self.assertIn("self", enum_values)
-        self.assertIn("agent_5", enum_values)
+        # В enum — отображаемое имя субагента (или agent_<id>, если имени нет).
+        self.assertTrue("Helper" in enum_values or "agent_5" in enum_values)
 
     def test_resolve_subagent_target(self):
         cfg = self.subagents.AgentSubagentsConfig(
@@ -144,6 +96,13 @@ class TestAgentConfig(unittest.TestCase):
                 "agent_99", parent_agent_id=3, config=cfg
             ),
         )
+
+    def test_accepts_parent_shared_rag_default_on(self):
+        from backend.agents.shared_rag import accepts_parent_shared_rag
+
+        self.assertTrue(accepts_parent_shared_rag({}))
+        self.assertTrue(accepts_parent_shared_rag({"use_parent_shared_rag": True}))
+        self.assertFalse(accepts_parent_shared_rag({"use_parent_shared_rag": False}))
 
 
 if __name__ == "__main__":

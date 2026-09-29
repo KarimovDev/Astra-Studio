@@ -15,6 +15,7 @@ import {
 import type { McpToolCallRecord } from '../types';
 import { downloadMcpFile } from '../api';
 import { mergeMcpToolCalls } from '../utils/mergeToolCalls';
+import { DocumentSearchPanel, type DocumentSearchTrace } from '../../components/DocumentSearchPanel';
 
 interface McpToolCallsPanelProps {
   toolCalls: McpToolCallRecord[];
@@ -80,10 +81,19 @@ function McpDownloadLink({ url, label }: { url: string; label?: string }) {
   );
 }
 
-function statusLabel(status: 'running' | 'completed' | 'failed', tool: string): string {
-  if (status === 'running') return `Выполняется: ${tool}`;
-  if (status === 'failed') return `Ошибка: ${tool}`;
-  return `Выполнено: ${tool}`;
+function statusLabel(
+  status: 'running' | 'completed' | 'failed',
+  tool: string,
+  toolArgs?: Record<string, unknown>,
+): string {
+  const agentName =
+    tool === 'subagent' && typeof toolArgs?.agent_name === 'string'
+      ? toolArgs.agent_name.trim()
+      : '';
+  const toolLabel = agentName || tool;
+  if (status === 'running') return `Выполняется: ${toolLabel}`;
+  if (status === 'failed') return `Ошибка: ${toolLabel}`;
+  return `Выполнено: ${toolLabel}`;
 }
 
 function CodeBlock({ children }: { children: string }) {
@@ -170,7 +180,7 @@ function McpToolCallCard({
           <CheckIcon sx={{ fontSize: 18, color: 'success.main', flexShrink: 0 }} />
         )}
         <Typography variant="body2" sx={{ flex: 1, fontWeight: 500 }}>
-          {statusLabel(execution.status, execution.tool)}
+          {statusLabel(execution.status, execution.tool, execution.arguments)}
         </Typography>
         {execution.duration_ms != null ? (
           <Typography variant="caption" color="text.secondary">
@@ -188,6 +198,11 @@ function McpToolCallCard({
 
       <Collapse in={open}>
         <Box sx={{ px: 1.25, pb: 1.25, display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+          {execution.document_search &&
+          (execution.document_search.hits?.length || execution.document_search.sourceFiles?.length) ? (
+            <DocumentSearchPanel trace={execution.document_search as DocumentSearchTrace} />
+          ) : null}
+
           <Box>
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
               AstraChat отправил эту информацию {serverLabel}

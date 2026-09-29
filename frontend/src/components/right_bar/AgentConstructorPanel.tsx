@@ -99,12 +99,17 @@ import { getSidebarPanelBackground, getSidebarPanelChrome, getSidebarSecondaryBu
 import RagUploadingFileThumb from '../RagUploadingFileThumb';
 import RagFilesSearchField from '../RagFilesSearchField';
 import { filterByRagFilenameQuery } from '../../utils/ragFilesSearch';
-import AgentChainEditor from './AgentChainEditor';
-import AgentSubagentsEditor, { EMPTY_SUBAGENT_CONFIG, type SubagentConfig } from './AgentSubagentsEditor';
+import AgentChainEditor from '../../agents/chain/AgentChainEditor';
+import AgentSubagentsEditor, {
+  EMPTY_SUBAGENT_CONFIG,
+  buildSubagentNamesSnapshot,
+  parseAgentNamesMap,
+  type SubagentConfig,
+} from '../../agents/subagents/AgentSubagentsEditor';
 import AgentTagsField, { normalizeAgentTags, type AgentTagValue } from './AgentTagsField';
 import { invalidateAgentTagsCache, fetchAgentTags, parseTagIds } from '../../constants/AgentTags';
-import MaxAgentStepsField from './MaxAgentStepsField';
-import AgentLimitField from './AgentLimitField';
+import AgentLimitField from '../../agents/AgentLimitField';
+import AgentChainSubagentsSettings from '../../agents/AgentChainSubagentsSettings';
 import { fetchAgentChainConfig, parseAgentIds } from '../../constants/agentChain';
 import {
   createRagPendingUploads,
@@ -460,6 +465,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [chainAgentIds, setChainAgentIds] = useState<number[]>([]);
   const [hideSequentialOutputs, setHideSequentialOutputs] = useState(false);
   const [sharedChainRag, setSharedChainRag] = useState(false);
+  const [useParentSharedRag, setUseParentSharedRag] = useState(true);
   const [chainMaxAgents, setChainMaxAgents] = useState(10);
   const [defaultMaxSubagents, setDefaultMaxSubagents] = useState(10);
   const [maxChainAgentsLimit, setMaxChainAgentsLimit] = useState<number | ''>('');
@@ -857,6 +863,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     );
     setHideSequentialOutputs(!!cfg.hide_sequential_outputs);
     setSharedChainRag(!!cfg.shared_chain_rag);
+    setUseParentSharedRag(cfg.use_parent_shared_rag !== false);
     const rawRecursion = cfg.recursion_limit;
     if (typeof rawRecursion === 'number' && rawRecursion > 0) {
       setRecursionLimit(rawRecursion);
@@ -865,14 +872,19 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     }
     const rawSub = cfg.subagents;
     if (rawSub && typeof rawSub === 'object') {
+      const subIds = parseAgentIds(
+        rawSub.agent_ids,
+        typeof selectedAgentId === 'number' ? selectedAgentId : null,
+        subLimit,
+      );
+      const snapNames = parseAgentNamesMap(rawSub.agent_names);
+      // Подмешать имена из текущего списка агентов (если они доступны).
+      const mergedNames = buildSubagentNamesSnapshot(subIds, agentsRef.current, snapNames);
       setSubagentsConfig({
         enabled: rawSub.enabled === true,
         allow_self: rawSub.allow_self !== false && rawSub.allowSelf !== false,
-        agent_ids: parseAgentIds(
-          rawSub.agent_ids,
-          typeof selectedAgentId === 'number' ? selectedAgentId : null,
-          subLimit,
-        ),
+        agent_ids: subIds,
+        agent_names: mergedNames,
         required_tag_ids: parseTagIds(rawSub.required_tag_ids),
         required_only: rawSub.required_only === true,
       });
@@ -909,6 +921,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     setChainAgentIds([]);
     setHideSequentialOutputs(false);
     setSharedChainRag(false);
+    setUseParentSharedRag(true);
     setMaxChainAgentsLimit('');
     setMaxSubagentsLimit('');
     setRecursionLimit('');
@@ -1210,6 +1223,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         ),
         hide_sequential_outputs: hideSequentialOutputs,
         shared_chain_rag: sharedChainRag,
+        use_parent_shared_rag: useParentSharedRag,
         ...(recursionLimit !== '' ? { recursion_limit: recursionLimit } : {}),
         ...(maxChainAgentsLimit !== '' ? { max_chain_agents: maxChainAgentsLimit } : {}),
         ...(maxSubagentsLimit !== '' ? { max_subagents: maxSubagentsLimit } : {}),
@@ -1222,6 +1236,15 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 typeof selectedAgentId === 'number' ? selectedAgentId : null,
                 effectiveSubagentsMax,
               ),
+              agent_names: buildSubagentNamesSnapshot(
+                parseAgentIds(
+                  subagentsConfig.agent_ids,
+                  typeof selectedAgentId === 'number' ? selectedAgentId : null,
+                  effectiveSubagentsMax,
+                ),
+                agents,
+                subagentsConfig.agent_names,
+              ),
               required_tag_ids: parseTagIds(subagentsConfig.required_tag_ids),
               required_only: subagentsConfig.required_only === true,
             }
@@ -1229,6 +1252,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               enabled: false,
               allow_self: subagentsConfig.allow_self,
               agent_ids: [],
+              agent_names: {},
               required_tag_ids: [],
               required_only: false,
             },
@@ -2364,77 +2388,100 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           </Box>
         </Box>
 
-        {/* ── Advanced agent limits ─────────────────────────────────────────── */}
-        <MaxAgentStepsField
-          value={recursionLimit}
-          onChange={setRecursionLimit}
-          defaultSteps={defaultGraphSteps}
-          maxSteps={maxRecursionLimit}
-          readOnly={readOnly}
-          panelChrome={panelChrome}
-          categoryFieldSx={categoryFieldSx}
-        />
+        {/* ── Субагенты ─────────────────────────────────────────────────────── */}
+        <Box sx={{ minWidth: 0 }}>
+          <SectionHeader>Субагенты</SectionHeader>
+          <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <AgentSubagentsEditor
+              currentAgentId={selectedAgentId}
+              config={subagentsConfig}
+              onChange={setSubagentsConfig}
+              agents={agents}
+              maxSubagents={effectiveSubagentsMax}
+              readOnly={readOnly}
+              panelChrome={panelChrome}
+              categoryFieldSx={categoryFieldSx}
+              afterModeSlot={
+                <AgentLimitField
+                  label="Максимум субагентов"
+                  tooltip={`Сколько субагентов можно добавить в список. Пусто — платформенный лимит (${defaultMaxSubagents}). Максимум ${defaultMaxSubagents}.`}
+                  value={maxSubagentsLimit}
+                  onChange={(next) => {
+                    setMaxSubagentsLimit(next);
+                    const limit = next !== '' ? next : defaultMaxSubagents;
+                    setSubagentsConfig((prev) => {
+                      const agent_ids = prev.agent_ids.slice(0, limit);
+                      const agent_names = buildSubagentNamesSnapshot(
+                        agent_ids,
+                        agents,
+                        prev.agent_names,
+                      );
+                      return { ...prev, agent_ids, agent_names };
+                    });
+                  }}
+                  defaultLimit={defaultMaxSubagents}
+                  maxLimit={defaultMaxSubagents}
+                  readOnly={readOnly}
+                  panelChrome={panelChrome}
+                  sx={nameFieldSx}
+                />
+              }
+            />
+          </Box>
+        </Box>
 
-        <AgentLimitField
-          label="Максимум субагентов"
-          tooltip={`Сколько субагентов можно добавить в список. Пусто — платформенный лимит (${defaultMaxSubagents}). Максимум ${defaultMaxSubagents}.`}
-          value={maxSubagentsLimit}
-          onChange={(next) => {
-            setMaxSubagentsLimit(next);
-            const limit = next !== '' ? next : defaultMaxSubagents;
-            setSubagentsConfig((prev) => ({
-              ...prev,
-              agent_ids: prev.agent_ids.slice(0, limit),
-            }));
-          }}
-          defaultLimit={defaultMaxSubagents}
-          maxLimit={defaultMaxSubagents}
-          readOnly={readOnly}
-          panelChrome={panelChrome}
-          categoryFieldSx={categoryFieldSx}
-        />
-        <AgentSubagentsEditor
-          currentAgentId={selectedAgentId}
-          config={subagentsConfig}
-          onChange={setSubagentsConfig}
-          agents={agents}
-          maxSubagents={effectiveSubagentsMax}
-          readOnly={readOnly}
-          panelChrome={panelChrome}
-          categoryFieldSx={categoryFieldSx}
-        />
+        {/* ── Цепочка агентов ───────────────────────────────────────────────── */}
+        <Box sx={{ minWidth: 0 }}>
+          <SectionHeader>Цепочка агентов</SectionHeader>
+          <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <AgentChainEditor
+              currentAgentId={selectedAgentId}
+              currentAgentName={name}
+              agentIds={chainAgentIds}
+              onChange={setChainAgentIds}
+              agents={agents}
+              readOnly={readOnly}
+              maxAgents={effectiveChainMax}
+              panelChrome={panelChrome}
+              categoryFieldSx={categoryFieldSx}
+            />
+            <AgentLimitField
+              label="Максимум агентов в цепочке"
+              tooltip={`Сколько агентов можно добавить в цепочку. Пусто — платформенный лимит (${chainMaxAgents}). Максимум ${chainMaxAgents}.`}
+              value={maxChainAgentsLimit}
+              onChange={(next) => {
+                setMaxChainAgentsLimit(next);
+                const limit = next !== '' ? next : chainMaxAgents;
+                setChainAgentIds((prev) => prev.slice(0, limit));
+              }}
+              defaultLimit={chainMaxAgents}
+              maxLimit={chainMaxAgents}
+              readOnly={readOnly}
+              panelChrome={panelChrome}
+              sx={nameFieldSx}
+            />
+          </Box>
+        </Box>
 
-        {/* ── Agent chain (LibreChat Mixture-of-Agents) ─────────────────────── */}
-        <AgentLimitField
-          label="Максимум агентов в цепочке"
-          tooltip={`Сколько агентов можно добавить в цепочку. Пусто — платформенный лимит (${chainMaxAgents}). Максимум ${chainMaxAgents}.`}
-          value={maxChainAgentsLimit}
-          onChange={(next) => {
-            setMaxChainAgentsLimit(next);
-            const limit = next !== '' ? next : chainMaxAgents;
-            setChainAgentIds((prev) => prev.slice(0, limit));
-          }}
-          defaultLimit={chainMaxAgents}
-          maxLimit={chainMaxAgents}
-          readOnly={readOnly}
-          panelChrome={panelChrome}
-          categoryFieldSx={categoryFieldSx}
-        />
-        <AgentChainEditor
-          currentAgentId={selectedAgentId}
-          currentAgentName={name}
-          agentIds={chainAgentIds}
-          onChange={setChainAgentIds}
-          hideSequential={hideSequentialOutputs}
-          onHideSequentialChange={setHideSequentialOutputs}
-          sharedRag={sharedChainRag}
-          onSharedRagChange={setSharedChainRag}
-          agents={agents}
-          readOnly={readOnly}
-          maxAgents={effectiveChainMax}
-          panelChrome={panelChrome}
-          categoryFieldSx={categoryFieldSx}
-        />
+        {/* ── Общие настройки цепочки и субагентов ──────────────────────────── */}
+        <Box sx={{ minWidth: 0 }}>
+          <SectionHeader>Общие настройки для цепочки агентов и субагентов</SectionHeader>
+          <AgentChainSubagentsSettings
+            recursionLimit={recursionLimit}
+            onRecursionLimitChange={setRecursionLimit}
+            defaultGraphSteps={defaultGraphSteps}
+            maxRecursionLimit={maxRecursionLimit}
+            hideSequentialOutputs={hideSequentialOutputs}
+            onHideSequentialOutputsChange={setHideSequentialOutputs}
+            sharedChainRag={sharedChainRag}
+            onSharedChainRagChange={setSharedChainRag}
+            useParentSharedRag={useParentSharedRag}
+            onUseParentSharedRagChange={setUseParentSharedRag}
+            readOnly={readOnly}
+            panelChrome={panelChrome}
+            fieldSx={nameFieldSx}
+          />
+        </Box>
 
         {/* ── File Search (KB) ─────────────────────────────────────────────── */}
         <Box sx={{ minWidth: 0 }}>

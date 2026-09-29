@@ -32,16 +32,29 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 _full_name_cache: Dict[str, Optional[str]] = {}
 
 
+async def _enrich_agents_for_response(agents: List[AgentWithTags]) -> None:
+    """ФИО авторов + имена субагентов в config (для шаринга/галереи)."""
+    if not agents:
+        return
+    await enrich_items_author_full_names(agents)
+    try:
+        from backend.agents.subagents.names import enrich_agents_subagent_names
+
+        await enrich_agents_subagent_names(agents)
+    except Exception:
+        logger.exception("Не удалось обогатить имена субагентов")
+
+
 @router.get("/chain-config")
 async def get_agent_chain_config():
     """Лимиты цепочки и шагов графа из ConfigMap (AGENT_CHAIN_MAX_AGENTS, AGENT_GRAPH_STEPS)."""
-    from backend.agents.chain import (
+    from backend.agents.chain.settings import (
         MAX_CHAIN_AGENTS_CAP,
         get_agent_graph_steps,
         get_max_chain_agents,
     )
     from backend.agents.config import DEFAULT_RECURSION_LIMIT, MAX_RECURSION_LIMIT_CAP
-    from backend.agents.subagents import MAX_SUBAGENTS_CAP, get_max_subagents
+    from backend.agents.subagents.settings import MAX_SUBAGENTS_CAP, get_max_subagents
 
     return {
         "max_agents": get_max_chain_agents(),
@@ -219,7 +232,7 @@ async def get_agent(agent_id: int, current_user: Annotated[Optional[dict], Depen
         if not can_access:
             raise HTTPException(status_code=403, detail="Нет доступа к этому агенту")
         await agent_repo.increment_views(agent_id)
-        await enrich_items_author_full_names([agent])
+        await _enrich_agents_for_response([agent])
         return agent
     except HTTPException:
         raise
@@ -278,7 +291,7 @@ async def get_agents(
         )
         user_id = current_user["user_id"] if current_user else None
         agents, total = await agent_repo.get_agents(filters, user_id)
-        await enrich_items_author_full_names(agents)
+        await _enrich_agents_for_response(agents)
         logger.debug("Получено агентов: %s, всего: %s", len(agents), total)
         pages = (total + limit - 1) // limit
         return AgentsResponse(agents=agents, total=total, page=page, pages=pages)
@@ -636,7 +649,7 @@ async def get_my_bookmarks(
             agent = await agent_repo.get_agent(agent_id, current_user["user_id"])
             if agent:
                 agents.append(agent)
-        await enrich_items_author_full_names(agents)
+        await _enrich_agents_for_response(agents)
         pages = (total + limit - 1) // limit
         logger.info(f"Возвращаем {len(agents)} агентов из закладок")
         return AgentsResponse(agents=agents, total=total, page=page, pages=pages)
@@ -663,7 +676,7 @@ async def get_my_agents(
             offset=(page - 1) * limit,
         )
         agents, total = await agent_repo.get_agents(filters, current_user["user_id"])
-        await enrich_items_author_full_names(agents)
+        await _enrich_agents_for_response(agents)
         pages = (total + limit - 1) // limit
         return AgentsResponse(agents=agents, total=total, page=page, pages=pages)
     except Exception as e:
@@ -683,7 +696,7 @@ async def get_shared_with_me(
         agents, total = await agent_repo.get_shared_with_me(
             current_user["user_id"], limit=limit, offset=(page - 1) * limit
         )
-        await enrich_items_author_full_names(agents)
+        await _enrich_agents_for_response(agents)
         pages = (total + limit - 1) // limit if total else 0
         return AgentsResponse(agents=agents, total=total, page=page, pages=pages)
     except Exception as e:

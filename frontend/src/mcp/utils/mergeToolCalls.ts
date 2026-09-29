@@ -79,6 +79,7 @@ export function mergeMcpToolCalls(records: McpToolCallRecord[]): McpToolExecutio
       has_audio: record.has_audio ?? base.has_audio,
       has_resource: record.has_resource ?? base.has_resource,
       ended_at: record.timestamp ?? base.ended_at,
+      document_search: record.document_search ?? base.document_search,
     };
 
     if (existingIdx != null) {

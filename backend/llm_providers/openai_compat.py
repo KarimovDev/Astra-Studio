@@ -36,7 +36,7 @@ from backend.settings.cef_logger.cef_logger import (
 )
 
 try:
-    from backend.llm_providers.routing import is_thinking_requested
+    from backend.llm_providers.routing import extra_params_headers, is_thinking_requested
 except Exception:  # pragma: no cover
     def is_thinking_requested(request_extra):
         if not request_extra:
@@ -47,6 +47,9 @@ except Exception:  # pragma: no cover
         if isinstance(ctk, dict) and 'enable_thinking' in ctk:
             return bool(ctk.get('enable_thinking'))
         return False
+
+    def extra_params_headers(payload):  # type: ignore[misc]
+        return {}
 
 from .presentation_continue import (
     _auto_continue_max,
@@ -135,16 +138,50 @@ def clean_llm_response(text: str) -> str:
 def _strip_think_tags(text: str) -> str:
     """Удаляет блоки <think>...</think> и незакрытые <think>... из текста.
 
+    Также вырезает «сиротский» закрывающий тег без открывающего
+    (Qwen3.5 / GLM в режиме enable_thinking=False часто пишут reasoning…</think>ответ).
+
     Используется в режиме быстрого ответа (thinking_requested=False), чтобы
     рассуждения модели не попадали в финальный ответ пользователю.
     """
-    if not text or "<think>" not in text.lower():
+    if not text:
         return text
-    # Закрытые блоки
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
-    # Незакрытый блок (модель не успела закрыть тег)
-    text = re.sub(r"<think>[\s\S]*$", "", text, flags=re.IGNORECASE)
+    lower = text.lower()
+    open_l = "<think>".lower()
+    close_l = "</think>".lower()
+    if open_l not in lower and close_l not in lower:
+        return text
+    if open_l in lower:
+        text = re.sub(
+            re.escape("<think>") + r"[\s\S]*?" + re.escape("</think>"),
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            re.escape("<think>") + r"[\s\S]*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+    # Orphan closer: всё до первого </think> включительно — рассуждение.
+    if close_l in text.lower():
+        text = re.sub(
+            r"^[\s\S]*?" + re.escape("</think>"),
+            "",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
     return text.strip()
+
+
+def _has_think_markers(text: str) -> bool:
+    """True, если в тексте есть открывающий или закрывающий think-тег."""
+    if not text:
+        return False
+    lower = text.lower()
+    return "<think>".lower() in lower or "</think>".lower() in lower
 
 
 def _normalize_reasoning_payload(value: Any) -> str:
@@ -297,7 +334,14 @@ class OpenAICompatProvider(LLMProvider):
 
     # ---- HTTP helpers -----------------------------------------------------
 
-    def _headers(self, *, accept_sse: bool = False) -> Dict[str, str]:
+    def _headers(
+        self,
+        *,
+        accept_sse: bool = False,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        """Заголовки запроса. ``payload`` — чтобы добавить проброс нестандартных
+        полей тела, если они в нём есть (см. ``extra_params_headers``)."""
         headers: Dict[str, str] = {"Content-Type": "application/json", "Accept": "application/json"}
         if accept_sse:
             headers["Accept"] = "text/event-stream"
@@ -307,6 +351,7 @@ class OpenAICompatProvider(LLMProvider):
             headers["Authorization"] = f"Bearer {api_key}"
             # На всякий случай дублируем — некоторые custom-серверы ждут X-API-Key.
             headers["X-API-Key"] = api_key
+        headers.update(extra_params_headers(payload))
         return headers
 
     def _auth_diag(self, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -633,7 +678,7 @@ class OpenAICompatProvider(LLMProvider):
             try:
                 response = await client.post(
                     f"{self.base_url}/v1/chat/completions",
-                    headers=self._headers(),
+                    headers=self._headers(payload=payload),
                     json=payload,
                 )
                 response.raise_for_status()
@@ -691,8 +736,20 @@ class OpenAICompatProvider(LLMProvider):
         )
         thinking_requested = is_thinking_requested(request_extra)
         cleaned = result.content
-        if not thinking_requested and "<think>" in cleaned.lower():
-            return _strip_think_tags(cleaned)
+        if not thinking_requested and _has_think_markers(cleaned):
+            stripped = _strip_think_tags(cleaned)
+            if not stripped.strip():
+                # Модель потратила весь бюджет на рассуждение и до ответа не дошла.
+                logger.warning(
+                    "[%s] модель вернула только рассуждение (%s симв.) и пустой ответ: "
+                    "model=%r max_tokens=%s. Увеличьте max_tokens или отключите "
+                    "мышление для служебных вызовов",
+                    self.id,
+                    len(cleaned),
+                    model,
+                    max_tokens,
+                )
+            return stripped
         return cleaned
 
     async def stream_chat(
@@ -894,7 +951,7 @@ class OpenAICompatProvider(LLMProvider):
         cleaned = clean_llm_response(accumulated)
         if thinking_requested:
             return cleaned
-        if "<think>" in cleaned.lower():
+        if _has_think_markers(cleaned):
             return _strip_think_tags(cleaned)
         if reasoning_accumulated.strip() and "<think>" not in cleaned:
             return f"<think>{reasoning_accumulated.strip()}</think>\n\n{cleaned}"
@@ -933,7 +990,7 @@ class OpenAICompatProvider(LLMProvider):
             model,
             self.base_url,
         )
-        headers = self._headers(accept_sse=True)
+        headers = self._headers(accept_sse=True, payload=payload)
         read_s = _stream_read_timeout_sec(self._timeout_read)
         stream_timeout = httpx.Timeout(read_s, connect=10.0, read=read_s, write=10.0)
         # Продолжаем накопление предыдущих проходов (auto-continue), чтобы callback
@@ -1066,12 +1123,16 @@ class OpenAICompatProvider(LLMProvider):
                                 ) 
                                 _end_reason = "chat_template_tag"
                                 return ("stop", accumulated, reasoning_accumulated)
+                            # Быстрый режим: не светим reasoning в UI (в т.ч. orphan </think>).
+                            cb_accumulated = accumulated
+                            if not thinking_requested and _has_think_markers(accumulated):
+                                cb_accumulated = _strip_think_tags(accumulated)
                             # Отдаём контентный чанк наружу — это и есть стрим на фронт.
                             # callback получает суммарный accumulated (в т.ч. хвост
                             # предыдущих проходов auto-continue), поэтому UI видит
                             # непрерывный текст. Отказ callback'а прерывает поток.
                             if (
-                                _invoke_stream_callback(callback, chunk, accumulated, "content")
+                                _invoke_stream_callback(callback, chunk, cb_accumulated, "content")
                                 is False
                             ):
                                 logger.debug("[%s] поток прерван callback'ом (content)", self.id)
@@ -1142,7 +1203,7 @@ class OpenAICompatProvider(LLMProvider):
             _chunks,
             len(accumulated),
             len(cleaned),
-            "<think>" in cleaned.lower(),
+            "<think>" in cleaned.lower() or "</think>" in cleaned.lower(),
             len(reasoning_accumulated),
             max_tokens,
             time.monotonic() - _t0,

@@ -53,6 +53,7 @@ import ArchiveModal from '../ArchiveModal';
 import NewProjectModal from '../NewProjectModal';
 import EditProjectModal from '../EditProjectModal';
 import SidebarRailMenuGlyph from '../../icons/SidebarRailMenuGlyph';
+import UpdatesDialog from './UpdatesDialog';
 import {
   MENU_BORDER_RADIUS_PX,
   getMenuColors,
@@ -2290,175 +2291,12 @@ backgroundColor: state.currentChatId === chat.id ? 'var(--sidebar-selected-bg, r
         </DialogContent>
       </Dialog>
 
-      {/* Диалог «Обновления» — широкий layout: дата слева, контент справа */}
-      <Dialog
+      {/* Диалог «Обновления» */}
+      <UpdatesDialog
         open={showUpdatesDialog}
         onClose={() => setShowUpdatesDialog(false)}
-        maxWidth={false}
-        fullWidth
-        BackdropProps={{
-          sx: { backgroundColor: isDarkMode ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.4)' },
-        }}
-        PaperProps={{ sx: helpDialogPaperSx }}
-      >
-        <Box sx={{ px: { xs: 2.5, sm: 3.5 }, pt: 2, pb: 0 }}>
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              pb: 0.5,
-              borderBottom: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.12)'}`,
-            }}
-          >
-            <Typography
-              component="span"
-              sx={{
-                fontSize: '1.75rem',
-                fontWeight: 700,
-                color: isDarkMode ? '#ffffff' : '#111',
-                lineHeight: 1.15,
-              }}
-            >
-              Обновления
-            </Typography>
-            <IconButton
-              onClick={() => setShowUpdatesDialog(false)}
-              size="small"
-              aria-label="Закрыть"
-              sx={{
-                color: isDarkMode ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.45)',
-                '&:hover': {
-                  backgroundColor: isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)',
-                },
-              }}
-            >
-              <CloseIcon fontSize="small" />
-            </IconButton>
-          </Box>
-        </Box>
-        <DialogContent
-          sx={{
-            px: { xs: 2.5, sm: 3.5 },
-            pt: 2.5,
-            pb: 3,
-            backgroundColor: 'transparent',
-          }}
-        >
-          {/* Блок релиза (ниже можно добавлять новые блоки через такую же полосу) */}
-          <Box
-            sx={{
-              display: 'flex',
-              flexDirection: { xs: 'column', sm: 'row' },
-              alignItems: 'flex-start',
-              gap: { xs: 1.5, sm: 4 },
-              pb: 2.75,
-            }}
-          >
-            <Typography
-              sx={{
-                flexShrink: 0,
-                width: { sm: 132 },
-                pt: { sm: 0.35 },
-                fontSize: '0.8125rem',
-                color: isDarkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              23 июня, 2026
-            </Typography>
-
-            <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography
-                sx={{
-                  fontSize: '1.5rem',
-                  fontWeight: 700,
-                  color: isDarkMode ? '#ffffff' : '#111',
-                  mb: 1.75,
-                  lineHeight: 1.3,
-                }}
-              >
-                Релиз версии 1.0 AstraChat
-              </Typography>
-
-              <Box
-                sx={{
-                  color: isDarkMode ? 'rgba(255,255,255,0.88)' : 'rgba(0,0,0,0.85)',
-                  fontSize: '0.9375rem',
-                  lineHeight: 1.55,
-                  '& .section-title': {
-                    fontWeight: 700,
-                    color: isDarkMode ? '#ffffff' : '#111',
-                    mt: 1.5,
-                    mb: 0.5,
-                  },
-                  '& .section-title:first-of-type': { mt: 0 },
-                  '& ul': { m: 0, pl: 2.5, mb: 0.25 },
-                  '& li': { mb: 0.35 },
-                }}
-              >
-                <Typography className="section-title" component="div">
-                  Авторизация:
-                </Typography>
-                <Box component="ul">
-                  <li>Добавлена авторизация по LDAP</li>
-                  <li>Добавлена авторизация по SSO</li>
-                </Box>
-
-                <Typography className="section-title" component="div">
-                  Чат:
-                </Typography>
-                <Box component="ul">
-                  <li>Настроена интеграция с LLM моделями домена CORSUR</li>
-                  <li>Настроена интеграция с LLM моделями домена PHOENIX</li>
-                </Box>
-
-                <Typography className="section-title" component="div">
-                  Файлы:
-                </Typography>
-                <Box component="ul">
-                  <li>
-                    Реализован функционал по прикреплению текстовых файлов (pdf, doc, docx, xlsx, txt)
-                    через кнопку &quot;+&quot; в окне ввода текста
-                  </li>
-                </Box>
-              </Box>
-
-              <Link
-                component="button"
-                type="button"
-                underline="always"
-                onClick={() => {
-                  setShowUpdatesDialog(false);
-                  navigate('/docs/astrachat-release-1.0');
-                }}
-                sx={{
-                  display: 'inline-block',
-                  mt: 2.25,
-                  border: 'none',
-                  background: 'none',
-                  cursor: 'pointer',
-                  font: 'inherit',
-                  p: 0,
-                  textAlign: 'left',
-                  ...helpLinkSx,
-                }}
-              >
-                Читать подробнее.
-              </Link>
-            </Box>
-          </Box>
-
-          {/* Нижняя полоса — разделитель для следующих релизов */}
-          <Box
-            sx={{
-              height: 0,
-              border: 'none',
-              borderTop: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.12)'}`,
-            }}
-          />
-        </DialogContent>
-      </Dialog>
+        isDarkMode={isDarkMode}
+      />
 
       {/* Диалог «Сочетание клавиш» */}
       <HotkeysSettingsDialog

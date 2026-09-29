@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from backend.database.postgresql.agent_models import (
     AGENT_PERMISSION_EDITOR,
@@ -786,6 +786,37 @@ WHERE id = ${param_num}
         except Exception:
             logger.exception("Ошибка выборки агентов по тегам %s", ids)
             return []
+
+    async def get_agent_names_map(self, agent_ids: List[int]) -> Dict[int, str]:
+        """Имена агентов по id без проверки доступа (для подписей субагентов в чужой карточке)."""
+        ids: List[int] = []
+        seen = set()
+        for raw in agent_ids or []:
+            try:
+                aid = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if aid <= 0 or aid in seen:
+                continue
+            seen.add(aid)
+            ids.append(aid)
+        if not ids:
+            return {}
+        try:
+            async with await self.db_connection.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT id, name FROM agents WHERE id = ANY($1::int[])",
+                    ids,
+                )
+                out: Dict[int, str] = {}
+                for row in rows:
+                    label = str(row["name"] or "").strip()
+                    if label:
+                        out[int(row["id"])] = label
+                return out
+        except Exception:
+            logger.exception("Ошибка чтения имён агентов %s", ids)
+            return {}
 
     async def remove_agent_from_subagents(self, deleted_id: int) -> None:
         """Убрать удалённого агента из config.subagents.agent_ids чужих карточек."""

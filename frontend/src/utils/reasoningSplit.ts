@@ -2,17 +2,30 @@
  * Разбор и очистка рассуждений модели для UI: ответ без цепочки + блок «рассуждение».
  */
 
+/** Сиротский </think> без открывающего (Qwen3.5 / GLM в fast-режиме). */
+function peelOrphanCloseThink(
+  visible: string,
+): { visible: string; extraReasoning: string | null } {
+  const closeRe = /<\/(?:think|redacted_thinking)>/i;
+  const m = visible.match(closeRe);
+  if (!m || m.index === undefined) {
+    return { visible, extraReasoning: null };
+  }
+  const reasoning = visible.slice(0, m.index).trim();
+  const rest = visible.slice(m.index + m[0].length).trim();
+  return { visible: rest, extraReasoning: reasoning || null };
+}
+
+
 export function stripReasoningMarkers(raw: string): string {
   if (!raw) return '';
   let visible = raw;
   visible = visible.replace(/<think>[\s\S]*?<\/redacted_thinking>/gi, '');
   visible = visible.replace(/<think>[\s\S]*?<\/think>/gi, '');
-  // Qwen3.5: orphan </think> без открывающего тега в completion
-  if (!/<think>/i.test(visible) && /<\/think>/i.test(visible)) {
-    visible = visible.replace(/^[\s\S]*?<\/think>\s*/i, '');
-  }
   visible = visible.replace(/<think>[\s\S]*$/i, '');
   visible = visible.replace(/<think>\s*$/gi, '');
+  const orphan = peelOrphanCloseThink(visible);
+  visible = orphan.visible;
   return visible.trim();
 }
 
@@ -109,15 +122,6 @@ export function extractReasoningBlock(
   strip(/<think>([\s\S]*?)<\/redacted_thinking>/gi);
   strip(/<think>([\s\S]*?)<\/think>/gi);
 
-  // Qwen3.5: открывающий <think> часто только в chat-template промпта —
-  // в completion приходит reasoning...</think>\n\nответ без открывающего тега.
-  const orphanClose = visible.match(/^([\s\S]*?)<\/think>\s*/i);
-  if (orphanClose && !(visible.match(/<think>/i))) {
-    const thinkContent = (orphanClose[1] || '').trim();
-    if (thinkContent) reasoningParts.push(thinkContent);
-    visible = visible.slice(orphanClose[0].length).trim();
-  }
-
   const unclosedMatch = visible.match(/<think>([\s\S]*)$/i);
   if (unclosedMatch) {
     const thinkContent = (unclosedMatch[1] || '').trim();
@@ -127,6 +131,12 @@ export function extractReasoningBlock(
   }
 
   visible = visible.replace(/<think>\s*$/gi, '').trim();
+
+  const orphan = peelOrphanCloseThink(visible);
+  if (orphan.extraReasoning) {
+    reasoningParts.push(orphan.extraReasoning);
+    visible = orphan.visible;
+  }
 
   const peel = peelPlaintextThinkingPrefix(visible, isStreaming);
   visible = peel.visible;

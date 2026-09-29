@@ -94,8 +94,11 @@ def sync_chat_via_registry(
     async def _call():
         from backend.llm_providers import get_registry
         from backend.llm_providers.routing import (
+            apply_no_think_tag,
+            merge_sampling_request_extra,
             service_call_request_extra,
             service_min_max_tokens,
+            service_no_think_tag_enabled,
             thinking_request_extra,
         )
 
@@ -121,16 +124,25 @@ def sync_chat_via_registry(
         # UI «Быстрый»/«Мышление»: явно шлём флаг (раньше при False extra не передавался).
         req_extra = thinking_request_extra(bool(enable_thinking))
         eff_max_tokens = max_tokens
+        no_think_tag = False
         if service_call and not enable_thinking:
             extra = service_call_request_extra()
             req_extra = extra if extra else None
             eff_max_tokens = max(int(max_tokens or 0), service_min_max_tokens())
+            # chat_template_kwargs шлюз может не пробросить до vLLM — тег в messages надёжнее.
+            if extra and service_no_think_tag_enabled():
+                messages = apply_no_think_tag(messages)
+                no_think_tag = True
             log.debug(
-                "[LLM] служебный вызов: отключение мышления=%s, max_tokens %s -> %s",
+                "[LLM] служебный вызов: мышление выключено=%s, /no_think=%s, max_tokens %s -> %s",
                 bool(extra),
+                no_think_tag,
                 max_tokens,
                 eff_max_tokens,
             )
+        # Поля выборки добавляем ПОСЛЕ ветки служебного вызова: там req_extra
+        # перезаписывается целиком, и слияние выше было бы затёрто.
+        req_extra = merge_sampling_request_extra(req_extra)
 
         if streaming and stream_callback:
 

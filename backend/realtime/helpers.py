@@ -139,9 +139,18 @@ async def kb_search_agent_documents(
 
 
 async def _resolve_agent_chat_params(
-    agent_id_raw, user_id=None, user: Optional[dict] = None
+    agent_id_raw,
+    user_id=None,
+    user: Optional[dict] = None,
+    *,
+    skip_access_check: bool = False,
 ) -> dict:
-    """Модель и параметры из карточки агента (конструктор)."""
+    """Модель и параметры из карточки агента (конструктор).
+
+    skip_access_check: для субагентов, явно указанных в карточке родителя —
+    пользователь уже имеет доступ к родителю, отдельный ACL на ребёнка
+    не требуется (иначе при шаринге/галерее parent видит имя, а запуск падает).
+    """
     empty = {
         "name": None,
         "model_path": None,
@@ -163,6 +172,7 @@ async def _resolve_agent_chat_params(
         "agent_ids": [],
         "hide_sequential_outputs": False,
         "shared_chain_rag": False,
+        "use_parent_shared_rag": True,
         "max_chain_agents": None,
         "max_subagents": None,
         "recursion_limit": None,
@@ -180,7 +190,7 @@ async def _resolve_agent_chat_params(
         repo = get_agent_repository()
         if repo is None:
             return empty
-        if not await repo.user_can_access_agent(aid, user_id):
+        if not skip_access_check and not await repo.user_can_access_agent(aid, user_id):
             logger.warning(f"[chat] нет доступа к agent_id={aid} для user={user_id}")
             return empty
         ag = await repo.get_agent(aid, user_id)
@@ -266,6 +276,8 @@ async def _resolve_agent_chat_params(
         )
         out["hide_sequential_outputs"] = bool(cfg.get("hide_sequential_outputs", False))
         out["shared_chain_rag"] = bool(cfg.get("shared_chain_rag", False))
+        # «Смотреть общий RAG родителя»: нет поля (старые карточки) - включён.
+        out["use_parent_shared_rag"] = cfg.get("use_parent_shared_rag") is not False
         raw_recursion = cfg.get("recursion_limit")
         if isinstance(raw_recursion, int) and raw_recursion > 0:
             out["recursion_limit"] = raw_recursion
@@ -287,6 +299,7 @@ async def _resolve_agent_chat_params(
             f"user_prompt_mode={out['user_prompt_mode']}, "
             f"agent_ids={out['agent_ids']}, hide_sequential={out['hide_sequential_outputs']}, "
             f"shared_chain_rag={out['shared_chain_rag']}, "
+            f"use_parent_shared_rag={out['use_parent_shared_rag']}, "
             f"recursion_limit={out.get('recursion_limit')}, "
             f"subagents_enabled={bool((out.get('subagents') or {}).get('enabled'))}"
         )

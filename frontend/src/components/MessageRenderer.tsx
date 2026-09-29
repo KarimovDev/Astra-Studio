@@ -24,10 +24,11 @@ import {
   splitTextWithMarkdownTables,
 } from '../utils/markdownTables';
 import { normalizeChatInlineHtml, extractPreservedHtmlBlocks } from '../utils/chatInlineHtml';
+import { extractChatMath, type ChatMathBlock } from '../utils/chatMath';
 import Editor, { loader } from '@monaco-editor/react';
 import * as XLSX from 'xlsx';
 import CodeSelectionMenu from './CodeSelectionMenu';
-import ChatInlineHtml from './ChatInlineHtml';
+import ChatRichInline from './ChatRichInline';
 import {
   useArtifactsViewerAllowed,
   useArtifactsViewerLiveGate,
@@ -1105,27 +1106,33 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
   };
 
   // Обработка Markdown внутри ячейки таблицы
-  const processCellMarkdown = (cellText: string): string => {
-    let processed = cellText;
-    
+  const processCellMarkdown = (
+    cellText: string,
+  ): { text: string; mathBlocks: ChatMathBlock[] } => {
+    const extracted = extractChatMath(cellText);
+    let processed = extracted.text;
+
     // Обрабатываем жирный текст
     processed = processed.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
     processed = processed.replace(/__(.*?)__/g, '<strong>$1</strong>');
-    
+
     // Обрабатываем курсив
     processed = processed.replace(/\*(.*?)\*/g, '<em>$1</em>');
     processed = processed.replace(/_(.*?)_/g, '<em>$1</em>');
-    
+
     // Обрабатываем зачеркнутый текст
     processed = processed.replace(/~~(.*?)~~/g, '<del>$1</del>');
-    
+
     // Обрабатываем инлайн код
     processed = processed.replace(/`([^`]+)`/g, '<code>$1</code>');
-    
+
     // Обрабатываем ссылки
-    processed = processed.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-    
-    return processed;
+    processed = processed.replace(
+      /\[([^\]]+)\]\(([^)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
+    );
+
+    return { text: processed, mathBlocks: extracted.blocks };
   };
 
   // Функция для экспорта таблицы в Excel
@@ -1266,17 +1273,24 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
             {headers.length > 0 && (
               <TableHead>
                 <TableRow sx={{ backgroundColor: 'primary.dark' }}>
-                  {headers.map((header, idx) => (
-                    <TableCell
-                      key={idx}
-                      sx={{
-                        ...headerCellSx,
-                        ...(idx === headers.length - 1 ? { pr: 6 } : {}),
-                      }}
-                    >
-                      <ChatInlineHtml text={processCellMarkdown(header)} />
-                    </TableCell>
-                  ))}
+                  {headers.map((header, idx) => {
+                    const cell = processCellMarkdown(header);
+                    return (
+                      <TableCell
+                        key={idx}
+                        sx={{
+                          ...headerCellSx,
+                          ...(idx === headers.length - 1 ? { pr: 6 } : {}),
+                        }}
+                      >
+                        <ChatRichInline
+                          text={cell.text}
+                          mathBlocks={cell.mathBlocks}
+                          keyPrefix={`th-${idx}`}
+                        />
+                      </TableCell>
+                    );
+                  })}
                 </TableRow>
               </TableHead>
             )}
@@ -1289,17 +1303,24 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
                     '&:hover': { backgroundColor: 'action.selected' },
                   }}
                 >
-                  {row.map((cell, cellIdx) => (
-                    <TableCell
-                      key={cellIdx}
-                      sx={{
-                        ...bodyCellSx,
-                        fontFamily: cell.match(/^\d+$/) ? 'monospace' : 'inherit',
-                      }}
-                    >
-                      <ChatInlineHtml text={processCellMarkdown(cell)} />
-                    </TableCell>
-                  ))}
+                  {row.map((cell, cellIdx) => {
+                    const processed = processCellMarkdown(cell);
+                    return (
+                      <TableCell
+                        key={cellIdx}
+                        sx={{
+                          ...bodyCellSx,
+                          fontFamily: cell.match(/^\d+$/) ? 'monospace' : 'inherit',
+                        }}
+                      >
+                        <ChatRichInline
+                          text={processed.text}
+                          mathBlocks={processed.mathBlocks}
+                          keyPrefix={`td-${rowIdx}-${cellIdx}`}
+                        />
+                      </TableCell>
+                    );
+                  })}
                 </TableRow>
               ))}
             </TableBody>
@@ -1777,7 +1798,12 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
   };
 
   // Рендер специальных блоков (Info, Warning, Error, Success)
-  const renderSpecialBlock = (type: 'info' | 'warning' | 'error' | 'success', content: string, key: any) => {
+  const renderSpecialBlock = (
+    type: 'info' | 'warning' | 'error' | 'success',
+    content: string,
+    key: any,
+    mathBlocks: ChatMathBlock[] = [],
+  ) => {
     const configs = {
       info: { icon: <InfoIcon />, color: '#2196f3', bgColor: 'rgba(33, 150, 243, 0.1)', title: 'Информация' },
       warning: { icon: <WarningIcon />, color: '#ff9800', bgColor: 'rgba(255, 152, 0, 0.1)', title: 'Внимание' },
@@ -1806,7 +1832,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
         </Box>
         <Box sx={{ flex: 1 }}>
           <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', lineHeight: 1.6, fontSize: fontSizeValue }}>
-            <ChatInlineHtml text={content} />
+            <ChatRichInline text={content} mathBlocks={mathBlocks} keyPrefix={`${key}-sp`} />
           </Typography>
         </Box>
       </Box>
@@ -1819,6 +1845,15 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
 
     // Нормализуем em-теги перед markdown/inline парсингом.
     text = sanitizeRawContent(text);
+
+    // LaTeX/KaTeX — до markdown-трансформов (иначе $...$ и \text ломаются).
+    const mathExtracted = extractChatMath(text);
+    text = mathExtracted.text;
+    const mathBlocks = mathExtracted.blocks;
+
+    const rich = (content: string, keyPrefix: string) => (
+      <ChatRichInline text={content} mathBlocks={mathBlocks} keyPrefix={keyPrefix} />
+    );
 
     // Целые HTML-блоки от LLM (ul/ol/pre/blockquote/…) — до построчной нарезки.
     const preserved = extractPreservedHtmlBlocks(text);
@@ -1929,7 +1964,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
         if (blockHtml) {
           return (
             <Box key={`${index}-htmlblock-${lineIndex}`} sx={{ my: 0.75 }}>
-              <ChatInlineHtml text={blockHtml} keyPrefix={`${index}-hb-${lineIndex}`} />
+              {rich(blockHtml, `${index}-hb-${lineIndex}`)}
             </Box>
           );
         }
@@ -1944,7 +1979,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
           const block = renderSpecialBlock(
             specialLines[specialBlockIndex].type,
             specialLines[specialBlockIndex].content,
-            `${index}-special-${lineIndex}`
+            `${index}-special-${lineIndex}`,
+            mathBlocks,
           );
           specialBlockIndex++;
           return block;
@@ -1971,7 +2007,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
               color: 'inherit',
             }}
           >
-            <ChatInlineHtml text={content} />
+            {rich(content, `${index}-h-${lineIndex}`)}
           </Typography>
         );
       }
@@ -2014,7 +2050,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
               <Box
                 component="span"
                 sx={{
-                  color: 'primary.main',
+                  color: 'currentColor',
                   fontWeight: 600,
                   flexShrink: 0,
                   minWidth: `${Math.max(2, String(listItemValue ?? 0).length + 1)}ch`,
@@ -2025,7 +2061,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
                 {listItemValue}.
               </Box>
               <Box sx={{ flex: 1, minWidth: 0 }}>
-                <ChatInlineHtml text={content} />
+                {rich(content, `${index}-li-${lineIndex}`)}
               </Box>
             </Box>
           ) : (
@@ -2037,11 +2073,11 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
                 ml: 2,
                 mb: 0.5,
                 '&::marker': {
-                  color: 'primary.main',
+                  color: 'currentColor',
                 },
               }}
             >
-              <ChatInlineHtml text={content} />
+              {rich(content, `${index}-li-${lineIndex}`)}
             </Box>
           );
         
@@ -2118,7 +2154,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
               color: 'text.secondary',
             }}
           >
-            <ChatInlineHtml text={content} />
+            {rich(content, `${index}-bq-${lineIndex}`)}
           </Box>
         );
       }
@@ -2152,7 +2188,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({
               userSelect: 'text',
             }}
           >
-            <ChatInlineHtml text={line} />
+            {rich(line, `${index}-p-${lineIndex}`)}
           </Typography>
         );
       }

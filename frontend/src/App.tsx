@@ -429,8 +429,18 @@ function App() {
                             <Route path="/agents-gallery" element={<AgentGalleryPage />} />
                             <Route path="/plugins-gallery" element={<PluginGalleryPage />} />
                             <Route path="/skills" element={<SkillsPage />} />
-                            <Route path="/docs/astrachat-release-1.0" element={<ReleaseNotesPage />} />
-                            <Route path="/docs/astrachat-release-1.0.html" element={<ReleaseNotesPage />} />
+                            <Route
+                              path="/docs/astrachat-release-1.0"
+                              element={<ReleaseNotesPage version="1.0" />}
+                            />
+                            <Route
+                              path="/docs/astrachat-release-2.0"
+                              element={<ReleaseNotesPage version="2.0" />}
+                            />
+                            <Route
+                              path="/docs/astrachat-release-1.0.html"
+                              element={<ReleaseNotesPage version="1.0" />}
+                            />
                             <Route path="/profile" element={<ProfilePage />} />
                             <Route path="/history" element={<HistoryPage />} />
                           </Routes>

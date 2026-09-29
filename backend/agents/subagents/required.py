@@ -25,7 +25,8 @@ import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from backend.agents.subagents import (
+from backend.agents.subagents.names import load_subagent_agent_names, short_agent_label
+from backend.agents.subagents.settings import (
     MAX_SUBAGENTS,
     NATIVE_SERVER_ID,
     SUBAGENT_TOOL_NAME,
@@ -226,8 +227,7 @@ async def run_required_subagents(
         )
         return empty
 
-    from backend.agents.subagent_runner import run_isolated_subagent
-    from backend.agents.subagents import load_subagent_agent_names
+    from backend.agents.subagents.runner import run_isolated_subagent
     from backend.mcp.events import emit_mcp_tool_end, emit_mcp_tool_start
 
     names = await load_subagent_agent_names(allowed, user_id=user_id)
@@ -250,9 +250,11 @@ async def run_required_subagents(
             )
             call_id = uuid.uuid4().hex
             started = time.perf_counter()
+            display_name = short_agent_label(names.get(aid) or f"Agent {aid}")
             args = {
                 "subagent_type": subagent_type_for_agent_id(aid),
                 "prompt": user_message,
+                "agent_name": display_name,
                 "required": True,
                 "via": "chat_hash_tag" if mention_tags else "card_required_tags",
             }
@@ -265,8 +267,9 @@ async def run_required_subagents(
                 arguments=args,
             )
             ok = True
+            doc_search = None
             try:
-                text = await run_isolated_subagent(
+                outcome = await run_isolated_subagent(
                     target_agent_id=aid,
                     prompt=user_message,
                     parent_profile=prof,
@@ -279,6 +282,13 @@ async def run_required_subagents(
                     emit_event=emit_event,
                     inline_attachments=inline_attachments,
                 )
+                from backend.agents.subagents.tool import SubagentOutcome
+
+                if isinstance(outcome, SubagentOutcome):
+                    text = outcome.text
+                    doc_search = outcome.document_search
+                else:
+                    text = str(outcome or "")
             except Exception as exc:
                 log.exception("[chat-#tag] agent_id=%s упал", aid)
                 text = f"Subagent error: {exc}"
@@ -304,6 +314,7 @@ async def run_required_subagents(
                 call_id=call_id,
                 arguments=args,
                 result=text,
+                document_search=doc_search if ok else None,
             )
             return aid, (text if ok else None)
 
@@ -359,3 +370,75 @@ async def run_required_subagents(
         allowed,
         direct_answer,
     )
+
+
+async def run_required_for_chat(
+    *,
+    data: Optional[dict],
+    final_message: str,
+    agent_profile: Optional[Dict[str, Any]],
+    history: Optional[List[Dict[str, Any]]],
+    current_user: Optional[dict],
+    enable_thinking: bool,
+    emit_event: Optional[Callable[[Dict[str, Any]], Any]],
+    stopped: Callable[[], bool],
+) -> Tuple[str, Optional[Dict[str, Any]], List[int], Optional[str]]:
+    """Предвызов обязательных субагентов и #тегов для сообщения в чате.
+
+    Зовётся из _handle_direct (realtime/handlers.py) до цикла инструментов
+    родителя. Возвращает то же, что run_required_subagents.
+    """
+    from backend.services.tag_mentions import collect_mention_tag_ids
+
+    mention_tags = collect_mention_tag_ids(
+        user_message=str(
+            (data or {}).get("message") if isinstance(data, dict) else ""
+        )
+        or final_message,
+        data=data if isinstance(data, dict) else None,
+    )
+    log.info(
+        "[chat-#tag] handlers: mention_tags=%s payload_tag_ids=%s "
+        "raw_message_has_mention=%s parent_agent_id=%s",
+        mention_tags,
+        (data or {}).get("tag_ids") if isinstance(data, dict) else None,
+        "<#"
+        in str((data or {}).get("message") if isinstance(data, dict) else ""),
+        (agent_profile or {}).get("agent_id")
+        if isinstance(agent_profile, dict)
+        else None,
+    )
+    # Mentions уже могли быть вырезаны из final_message — берём и из payload.
+    (
+        final_message,
+        agent_profile,
+        required_called,
+        mention_direct_answer,
+    ) = await run_required_subagents(
+        agent_profile=agent_profile,
+        user_message=final_message,
+        history=history,
+        user=current_user,
+        user_id=(current_user or {}).get("user_id"),
+        enable_thinking=enable_thinking,
+        emit_event=emit_event,
+        stopped=stopped,
+        inline_attachments=(
+            data.get("inline_attachments") if isinstance(data, dict) else None
+        ),
+        mention_tag_ids=mention_tags,
+    )
+    if mention_direct_answer:
+        log.info(
+            "[chat-#tag] handlers: используем прямой ответ агентов "
+            "(без родительского LLM), called=%s len=%s",
+            required_called,
+            len(mention_direct_answer),
+        )
+    elif required_called:
+        log.info(
+            "[chat-#tag] handlers: ответы агентов вложены в промпт родителя, "
+            "called=%s",
+            required_called,
+        )
+    return final_message, agent_profile, required_called, mention_direct_answer

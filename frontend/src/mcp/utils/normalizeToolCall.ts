@@ -33,6 +33,10 @@ export function normalizeMcpToolCallRecord(raw: Record<string, unknown>): McpToo
           };
         })
       : undefined,
+    document_search:
+      raw.document_search && typeof raw.document_search === 'object'
+        ? (raw.document_search as McpToolCallRecord['document_search'])
+        : undefined,
   };
 }
 

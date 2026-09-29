@@ -2,12 +2,17 @@ import React from 'react';
 import { Box } from '@mui/material';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import { preprocessArtifactLatex } from '../../utils/chatMath';
 
 interface Props {
   content: string;
 }
 
 export default function ArtifactMarkdownPreview({ content }: Props) {
+  const prepared = preprocessArtifactLatex(content || '');
+
   return (
     <Box
       sx={{
@@ -27,9 +32,15 @@ export default function ArtifactMarkdownPreview({ content }: Props) {
         '& code': { fontFamily: 'Consolas, monospace', fontSize: '0.85em' },
         '& table': { borderCollapse: 'collapse', width: '100%', mb: 1.5 },
         '& th, & td': { border: '1px solid rgba(0,0,0,0.12)', p: 0.75, textAlign: 'left' },
+        '& .katex-display': { my: 1.5, overflowX: 'auto' },
       }}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content || ''}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: true }]]}
+        rehypePlugins={[rehypeKatex]}
+      >
+        {prepared}
+      </ReactMarkdown>
     </Box>
   );
 }

@@ -6,12 +6,14 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from backend.agents.config import resolve_recursion_limit
 from backend.agents.step_debug import describe_limit_source, log_pre_loop
-from backend.agents.subagents import (
-    SubagentRunContext,
-    build_subagent_tools,
-    load_subagent_agent_names,
-    subagents_from_profile,
+from backend.agents.subagents.parent import (
+    build_parent_run_context,
+    finish_parent_result,
+    prepare_parent_tools,
+    with_parent_plan,
+    with_parent_rules,
 )
+from backend.agents.subagents.tool import SubagentRunContext
 from backend.llm_providers.routing import (
     merge_sampling_request_extra,
     thinking_request_extra,
@@ -89,25 +91,14 @@ async def maybe_run_mcp_agent(
     agent_profile: Optional[dict] = None,
 ) -> Optional[AgentLoopResult]:
     platform = get_mcp_platform()
-    native_tools = list(native_tools or [])
-    sub_cfg = subagent_config
     sub_ctx = subagent_ctx
-
-    if agent_profile is not None and sub_cfg is None:
-        sub_cfg = subagents_from_profile(agent_profile)
-    if agent_profile is not None and sub_cfg.enabled and not native_tools:
-        parent_id = agent_profile.get("agent_id")
-        names = await load_subagent_agent_names(
-            sub_cfg.agent_ids,
-            user_id=mcp_context.user_id or None,
-        )
-        if parent_id is not None and agent_profile.get("name"):
-            names[int(parent_id)] = str(agent_profile["name"])
-        native_tools = build_subagent_tools(
-            sub_cfg,
-            parent_agent_id=int(parent_id) if parent_id is not None else None,
-            agent_names=names,
-        )
+    native_tools, sub_cfg = await prepare_parent_tools(
+        agent_profile=agent_profile,
+        sub_cfg=subagent_config,
+        sub_ctx=sub_ctx,
+        native_tools=native_tools,
+        user_id=mcp_context.user_id or None,
+    )
 
     has_native = bool(native_tools)
     mcp_tools: List[McpToolInfo] = []
@@ -175,27 +166,46 @@ async def maybe_run_mcp_agent(
             f"серверы={enabled_ids} модель={model_path}"
         ),
     )
+    # Есть инструмент subagent - родителю правила работы с ответами детей.
+    system_prompt = with_parent_rules(system_prompt, native_tools)
+    # План хода главного по его инструкции (agents/subagents/plan.py).
+    system_prompt = await with_parent_plan(
+        system_prompt,
+        user_message=user_message,
+        history=history,
+        model_path=model_path,
+        native_tools=native_tools,
+        sub_ctx=sub_ctx,
+        sub_cfg=sub_cfg,
+    )
     messages = build_chat_messages(
         user_message=user_message, history=history, system_prompt=system_prompt
     )
     request_extra = thinking_request_extra(bool(enable_thinking))
     request_extra = merge_sampling_request_extra(request_extra)
     loop = get_mcp_agent_loop()
-    return await loop.run(
-        messages=messages,
-        model_path=model_path,
-        mcp_tools=mcp_tools,
-        mcp_context=mcp_context,
-        enabled_server_ids=enabled_ids,
-        max_iterations=step_limit,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        request_extra=request_extra,
-        event_callback=event_callback,
-        native_tools=native_tools,
-        subagent_ctx=sub_ctx,
-        subagent_config=sub_cfg,
-    )
+
+    async def _run_loop(extra_messages=None):
+        return await loop.run(
+            messages=messages + list(extra_messages or []),
+            model_path=model_path,
+            mcp_tools=mcp_tools,
+            mcp_context=mcp_context,
+            enabled_server_ids=enabled_ids,
+            max_iterations=step_limit,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            request_extra=request_extra,
+            event_callback=event_callback,
+            native_tools=native_tools,
+            subagent_ctx=sub_ctx,
+            subagent_config=sub_cfg,
+        )
+
+    result = await _run_loop()
+    # [[ОТВЕТ N]] в итоге родителя -> ответ ребёнка как есть. Метка без
+    # вызова субагента - повтор цикла с пояснением (не больше одного раза).
+    return await finish_parent_result(result, sub_ctx, rerun=_run_loop)
 
 
 async def run_mcp_for_chat(
@@ -215,6 +225,7 @@ async def run_mcp_for_chat(
     agent_profile: Optional[dict] = None,
     subagent_executor=None,
     inline_attachments: Optional[List[Any]] = None,
+    user_question: Optional[str] = None,
 ) -> Optional[AgentLoopResult]:
     """
     Единая точка входа MCP для socket и REST chat (B-40).
@@ -224,38 +235,16 @@ async def run_mcp_for_chat(
     ``model`` в ``emit_event`` callback на стороне handler.
     """
     mcp_ctx = build_mcp_context_from_user(user, chat_id=chat_id, message_id=message_id)
-    sub_cfg = subagents_from_profile(agent_profile) if agent_profile else None
-    sub_ctx = None
-    if agent_profile and sub_cfg and sub_cfg.enabled:
-        from backend.agents.subagent_runner import run_isolated_subagent
-
-        parent_id = agent_profile.get("agent_id")
-        step_limit = resolve_recursion_limit(agent_profile)
-
-        async def _executor(**kwargs):
-            return await run_isolated_subagent(
-                target_agent_id=kwargs["target_agent_id"],
-                prompt=kwargs["prompt"],
-                parent_profile=kwargs["parent_profile"],
-                user=user,
-                user_id=mcp_ctx.user_id or None,
-                depth=kwargs.get("depth", 0),
-                remaining_steps=kwargs.get("remaining_steps", step_limit - 1),
-                enable_thinking=enable_thinking,
-                emit_event=emit_event,
-                inline_attachments=kwargs.get("inline_attachments"),
-            )
-
-        sub_ctx = SubagentRunContext(
-            parent_agent_id=int(parent_id) if parent_id is not None else None,
-            parent_profile=dict(agent_profile),
-            user=user,
-            user_id=mcp_ctx.user_id or None,
-            depth=0,
-            remaining_steps=step_limit - 1,
-            executor=subagent_executor or _executor,
-            inline_attachments=list(inline_attachments or []) or None,
-        )
+    sub_cfg, sub_ctx = build_parent_run_context(
+        agent_profile,
+        user=user,
+        user_id=mcp_ctx.user_id or None,
+        enable_thinking=enable_thinking,
+        emit_event=emit_event,
+        inline_attachments=inline_attachments,
+        user_question=user_question,
+        executor=subagent_executor,
+    )
 
     return await maybe_run_mcp_agent(
         tool_ids=tool_ids,

@@ -72,6 +72,20 @@ export interface McpToolCallRecord {
   has_audio?: boolean;
   has_resource?: boolean;
   download_urls?: Array<{ url: string; label?: string; mime?: string }>;
+  /** RAG-трейс субагента (документы / чанки / relevance). */
+  document_search?: {
+    query: string;
+    sourceFiles: string[];
+    hits: Array<{
+      file: string;
+      anchor: string;
+      relevance: number;
+      content: string;
+      chunkIndex: number;
+      documentId: number;
+      store: string;
+    }>;
+  };
 }
 
 /** Объединённая карточка tool start + end для UI. */
@@ -93,6 +107,7 @@ export interface McpToolExecution {
   has_resource?: boolean;
   started_at?: number;
   ended_at?: number;
+  document_search?: McpToolCallRecord['document_search'];
 }
 
 export interface McpCredentialsMetadata {

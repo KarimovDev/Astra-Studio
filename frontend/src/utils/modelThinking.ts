@@ -38,7 +38,8 @@ export function isThinkingCapableModel(modelPathOrName: string | null | undefine
     normalized.includes('qwen3') ||
     normalized.includes('deepseek-r1') ||
     normalized.includes('reasoner') ||
-    normalized.includes('thinking')
+    normalized.includes('thinking') ||
+    normalized.includes('glm')
   );
 }
 
