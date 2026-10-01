@@ -16,7 +16,8 @@ from app.utils.gguf_paths import resolve_gguf_path
 
 logger = logging.getLogger(__name__)
 
-MODEL_LOAD_TIMEOUT = int(os.environ.get("LLM_MODEL_LOAD_TIMEOUT", "600"))
+# 27B Q8 (~30 ГБ) на CPU (gpu_layers=0) легко грузится дольше 10 мин.
+MODEL_LOAD_TIMEOUT = int(os.environ.get("LLM_MODEL_LOAD_TIMEOUT", "1800"))
 MAX_LOADED_MODELS = max(1, int(os.environ.get("LLM_MAX_LOADED_MODELS", "4")))
 
 
@@ -520,10 +521,10 @@ class LlamaHandler(BaseLLMHandler):
             async with self._registry_lock:
                 if model_id in self._model_slots:
                     self._model_slots.move_to_end(model_id)
-                    if self._primary_model_id is None:
-                        self._primary_model_id = model_id
+                    # Явный /load — делаем выбранную модель primary (не оставляем старый default).
+                    self._primary_model_id = model_id
                     self.is_initialized = True
-                    logger.info(f"Model {model_id} already in pool (LRU touch)")
+                    logger.info(f"Model {model_id} already in pool (LRU touch, set primary)")
                     return True
 
             victim_slot: Optional[_Slot] = None
@@ -536,7 +537,7 @@ class LlamaHandler(BaseLLMHandler):
 
         # Дальше — долгий I/O/CPU; без удержания _model_switch_lock, чтобы не блокировать
         # /v1/health, чат с уже загруженной моделью и второй параллельный /load
-        
+
         if victim_slot is not None:
             logger.info(f"LRU evict from pool: {evicted_id} (max={MAX_LOADED_MODELS})")
             await self._dispose_slot(victim_slot)
@@ -555,8 +556,7 @@ class LlamaHandler(BaseLLMHandler):
                 if model_id in self._model_slots:
                     dispose_after.append(_Slot(new_llama, model_path))
                     self._model_slots.move_to_end(model_id)
-                    if self._primary_model_id is None:
-                        self._primary_model_id = model_id
+                    self._primary_model_id = model_id
                     self.is_initialized = True
                     logger.info(f"Model {model_id} уже в пуле (параллельная загрузка), отбрасываем дубликат")
                 else:
@@ -567,8 +567,7 @@ class LlamaHandler(BaseLLMHandler):
                             self._primary_model_id = next(iter(self._model_slots.keys()), None)
                     self._model_slots[model_id] = _Slot(new_llama, model_path)
                     self._model_slots.move_to_end(model_id)
-                    if self._primary_model_id is None:
-                        self._primary_model_id = model_id
+                    self._primary_model_id = model_id
                     self.is_initialized = True
                     logger.info(f"Pool load OK: {model_id} (total loaded: {len(self._model_slots)})")
 

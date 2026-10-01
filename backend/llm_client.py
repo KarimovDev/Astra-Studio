@@ -594,7 +594,7 @@ class LLMClient:
         except Exception as e:
             logger.debug("ProviderRegistry load_model fallback to legacy HTTP: %s", e)
         base = self._url_for_llm_host(host_id)
-        load_timeout = httpx.Timeout(1200.0, connect=10.0, read=1200.0, write=30.0)
+        load_timeout = httpx.Timeout(2400.0, connect=10.0, read=2400.0, write=30.0)
         try:
             async with httpx.AsyncClient(verify=self._verify, timeout=load_timeout) as client:
                 response = await client.post(

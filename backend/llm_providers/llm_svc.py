@@ -13,16 +13,15 @@
 from __future__ import annotations
 
 import asyncio
-import weakref
+import logging
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 from .base import LLMProviderConfig, ProviderCapabilities, ProviderHealth
 from .openai_compat import OpenAICompatProvider
-from backend.settings.logging import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def same_llm_svc_model_id(loaded: Optional[str], requested: Optional[str]) -> bool:
@@ -63,23 +62,14 @@ class LlmSvcProvider(OpenAICompatProvider):
         multi_loaded=True,
         native_chat_api=True,
         streaming=True,
-        vision=False,
+        vision=True,
     )
 
     def __init__(self, config: LLMProviderConfig) -> None:
         super().__init__(config)
-        # Сериализация swap: lock создаётся лениво per event loop.
-        self._switch_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
-            weakref.WeakKeyDictionary()
-        )
-
-    def _switch_lock(self) -> asyncio.Lock:
-        loop = asyncio.get_running_loop()
-        lock = self._switch_locks.get(loop)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._switch_locks[loop] = lock
-        return lock
+        # Сериализация swap: параллельные multi-LLM слоты не должны
+        # затирать друг другу загруженную модель на одном llm-svc.
+        self._switch_lock: asyncio.Lock = asyncio.Lock()
 
     # ---- internal helpers -------------------------------------------------
 
@@ -131,7 +121,7 @@ class LlmSvcProvider(OpenAICompatProvider):
         if pool_contains_model(health.loaded_models, mid):
             return True
 
-        async with self._switch_lock():
+        async with self._switch_lock:
             health2 = await self.health()
             if pool_contains_model(health2.loaded_models, mid):
                 return True

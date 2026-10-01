@@ -82,10 +82,13 @@ function main() {
     console.warn('[presentation-assets] chart.js не найден — выполните npm install chart.js');
   }
 
+  const PPTX_ROOT = path.join(ROOT, '..', 'pptx');
   const iconMappings = [
     { from: path.join(PPTX_ICONS, 'icons'), to: path.join(PUBLIC_STATIC, 'icons') },
     { from: path.join(PPTX_ICONS, 'icons_new'), to: path.join(PUBLIC_STATIC, 'icons_new') },
     { from: path.join(PPTX_ICONS, 'fonts'), to: path.join(PUBLIC_STATIC, 'fonts') },
+    // Шаблон v2 (RAO): иконки + декор из pptx/icons_v2
+    { from: path.join(PPTX_ROOT, 'icons_v2'), to: path.join(PUBLIC_STATIC, 'icons_v2') },
   ];
 
   for (const { from, to } of iconMappings) {
