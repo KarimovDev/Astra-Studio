@@ -1093,6 +1093,16 @@ WHERE id = ${param_num}
             logger.exception("Ошибка при получении закладок")
             return ([], 0)
 
+    async def get_default_agent(self, deployment_key: str, user_id: str) -> Optional[AgentWithTags]:
+        async with await self.db_connection.acquire() as conn:
+            agent_id = await conn.fetchval(
+                "SELECT agent_id FROM deployment_defaults WHERE deployment_key = $1",
+                deployment_key,
+            )
+        if agent_id is None or not await self.user_can_access_agent(agent_id, user_id):
+            return None
+        return await self.get_agent(agent_id, user_id)
+
     async def get_user_permission(self, agent_id: int, user_id: Optional[str] = None) -> Optional[str]:
         """
         Роль пользователя для агента: owner | editor | viewer | None.

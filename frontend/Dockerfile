@@ -8,10 +8,12 @@ WORKDIR /app
 # Установка build arguments
 ARG REACT_APP_API_URL=http://localhost:8000
 ARG REACT_APP_WS_URL=ws://localhost:8000
+ARG REACT_APP_DEFAULT_AGENT_KEY=
 
 # Установка переменных окружения
 ENV REACT_APP_API_URL=$REACT_APP_API_URL
 ENV REACT_APP_WS_URL=$REACT_APP_WS_URL
+ENV REACT_APP_DEFAULT_AGENT_KEY=$REACT_APP_DEFAULT_AGENT_KEY
 
 # Увеличиваем heap Node.js для сборки webpack + monaco-editor
 ENV NODE_OPTIONS=--max-old-space-size=4096

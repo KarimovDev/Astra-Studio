@@ -38,6 +38,7 @@ export function buildInlinePresentationViewerSrcDoc(rawHtml: string): string {
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
+  <link rel="stylesheet" href="/static/fonts/liberation-sans.css">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <script src="${pptxScript}"></script>
@@ -290,6 +291,7 @@ export function buildInlinePresentationViewerSrcDoc(rawHtml: string): string {
       clone.style.maxHeight = 'none';
       clone.style.boxSizing = 'border-box';
       clone.style.overflow = 'hidden';
+      clone.style.fontFamily = slides[i].ownerDocument.defaultView.getComputedStyle(slides[i]).fontFamily;
       viewer.innerHTML = '';
       viewer.appendChild(clone);
       document.getElementById('counter').textContent = (i + 1) + ' / ' + slides.length;
@@ -322,12 +324,16 @@ export function buildInlinePresentationViewerSrcDoc(rawHtml: string): string {
         var d = document.createElement('div');
         d.style.cssText = 'width:${SLIDE_W_MM}mm;height:${SLIDE_H_MM}mm;overflow:hidden;position:relative;';
         var c = s.cloneNode(true);
-        c.style.cssText = 'width:100%;height:100%;margin:0;font-family:"Cera CY",sans-serif;';
+        c.style.width = '100%';
+        c.style.height = '100%';
+        c.style.margin = '0';
+        c.style.fontFamily = s.ownerDocument.defaultView.getComputedStyle(s).fontFamily;
         d.appendChild(c);
         wrap.appendChild(d);
         return d;
       });
       try {
+        await document.fonts.ready;
         await domToPptx.exportToPptx(elems, {
           fileName: 'presentation.pptx',
           svgAsVector: true,

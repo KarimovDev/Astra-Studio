@@ -1,0 +1,74 @@
+app:
+  name: Astra Studio — Inter RAO
+  debug: false
+server:
+  host: 0.0.0.0
+  port: 8000
+cors:
+  allowed_origins: [https://astra.karimov-dev.ru]
+  allow_credentials: true
+
+default_llm_provider: openrouter
+llm_providers:
+  - id: openrouter
+    kind: openrouter
+    base_url: https://openrouter.ai/api
+    api_key_env: OPENROUTER_API_KEY
+    static_model: "@preset/astra-studio-chat"
+    models: ["@preset/astra-studio-chat"]
+    timeout: 600
+    extra:
+      function_calling: true
+      http_referer: https://astra.karimov-dev.ru
+      x_title: Astra Studio — Inter RAO
+
+# No local LLM is deployed. Keep only the legacy fields required by older clients.
+llm_service:
+  enabled: false
+  timeout: 600
+  retry_attempts: 1
+  retry_delay: 1
+  default_model: "openrouter/@preset/astra-studio-chat"
+  fallback_model: ""
+  auto_select: false
+  hosts: []
+
+mongodb: {}
+postgresql: {}
+minio: {}
+memory:
+  enabled: true
+  file_path: /app/memory
+coding_agent:
+  enabled: false
+mcp:
+  enabled: false
+  servers: []
+plugins:
+  enabled: false
+  catalog: []
+image_generation:
+  enabled: false
+video_generation:
+  enabled: false
+microservices:
+  stt: {enabled: false}
+  tts: {enabled: false}
+  ocr: {enabled: false}
+  diarization: {enabled: false}
+
+urls:
+  frontend_port: https://astra.karimov-dev.ru
+  backend_port: https://astra.karimov-dev.ru
+  ingress_port: https://astra.karimov-dev.ru
+  # Unused legacy service addresses; no requests should be routed here by the agent.
+  llm_service_port: http://127.0.0.1:8002
+  llm_service_docker: http://127.0.0.1:8002
+  stt_service_port: http://127.0.0.1:8001
+  stt_service_docker: http://127.0.0.1:8001
+  tts_service_port: http://127.0.0.1:8005
+  tts_service_docker: http://127.0.0.1:8005
+  ocr_service_port: http://127.0.0.1:8004
+  ocr_service_docker: http://127.0.0.1:8004
+  diarization_service_port: http://127.0.0.1:8003
+  diarization_service_docker: http://127.0.0.1:8003

@@ -2,6 +2,7 @@ import React from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Box, CircularProgress } from '@mui/material';
+import DefaultAgentSetup from './DefaultAgentSetup';
 
 interface PrivateRouteProps {
   children: React.ReactElement;
@@ -29,8 +30,7 @@ export default function PrivateRoute({ children }: PrivateRouteProps) {
     return <Navigate to="/login" replace />;
   }
 
-  return children;
+  return <DefaultAgentSetup>{children}</DefaultAgentSetup>;
 }
-
 
 

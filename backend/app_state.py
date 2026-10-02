@@ -88,16 +88,24 @@ except Exception:
 try:
     from backend.settings.rag_client import get_rag_client
 
-    rag_client = get_rag_client()
-    logger.info(f"RagClient инициализирован, base_url={rag_client.base_url}")
+    rag_client = (
+        get_rag_client()
+        if os.getenv("RAG_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+        else None
+    )
+    logger.info("RagClient инициализирован" if rag_client else "RAG отключён конфигурацией")
 except Exception:
     logger.exception("RagClient недоступен")
     rag_client = None
 try:
     from backend.settings.rag_models_client import get_rag_models_client
 
-    rag_models_client = get_rag_models_client()
-    logger.info(f"RagModelsClient инициализирован, base_url={rag_models_client.base_url}")
+    rag_models_client = (
+        get_rag_models_client()
+        if os.getenv("RAG_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+        else None
+    )
+    logger.info("RagModelsClient инициализирован" if rag_models_client else "RAG models отключены конфигурацией")
 except Exception:
     logger.exception("RagModelsClient недоступен")
     rag_models_client = None

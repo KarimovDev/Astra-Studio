@@ -1,0 +1,133 @@
+# Standalone deployment: do not merge with the GPU docker-compose.yml.
+name: astra-inter-rao
+
+services:
+  astrachat-backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${ASTRA_BACKEND_PORT:-18000}:8000"
+    environment:
+      PYTHONPATH: /app
+      DOCKER_ENV: "true"
+      CONFIG_PATH: /app/config/inter-rao/backend.yml
+      PRESENTATION_BOOTSTRAP_SKILL_PATH: /app/config/inter-rao/skill_presentation_v2.md
+      DEFAULT_AGENT_KEY: inter-rao-presentation-v2
+      PRESENTATION_AGENT_OWNER: admin
+      PRESENTATION_MODEL_PATH: openrouter/@preset/astra-studio-chat
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?Set OPENROUTER_API_KEY}
+      # Legacy audio import guard; actual LLM routing uses llm_providers in YAML.
+      USE_LLM_SVC: "true"
+      RAG_ENABLED: "false"
+      RAG_MEMORY_ENABLED: "false"
+      IMAGE_GEN_ENABLED: "false"
+      VIDEO_GEN_ENABLED: "false"
+      LDAP_ENABLED: "false"
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?Set JWT_REFRESH_SECRET}
+      MOCK_ADMIN_PASSWORD: ${MOCK_ADMIN_PASSWORD:?Set MOCK_ADMIN_PASSWORD}
+      MOCK_USER_PASSWORD: ${MOCK_USER_PASSWORD:?Set MOCK_USER_PASSWORD}
+      MOCK_TEST_PASSWORD: ${MOCK_TEST_PASSWORD:?Set MOCK_TEST_PASSWORD}
+      MONGODB_HOST: mongodb
+      MONGODB_PORT: "27017"
+      MONGODB_DATABASE: astrachat
+      MONGODB_AUTH_SOURCE: admin
+      MONGODB_USER: astrachat
+      MONGODB_PASSWORD: ${MONGODB_PASSWORD:?Set MONGODB_PASSWORD}
+      POSTGRES_HOST: postgresql
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: astrachat
+      POSTGRES_USER: astrachat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      EMBEDDING_DIM: "1536"
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_ACCESS_KEY: astrachat
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET_NAME: astrachat-temp
+    volumes:
+      - ./deploy/inter-rao:/app/config/inter-rao:ro
+      - backend_memory:/app/memory
+      - backend_uploads:/app/uploads
+      - backend_logs:/app/logs
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      postgresql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  astrachat-frontend:
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_API_URL: https://astra.karimov-dev.ru
+        REACT_APP_WS_URL: wss://astra.karimov-dev.ru
+        REACT_APP_DEFAULT_AGENT_KEY: inter-rao-presentation-v2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${ASTRA_FRONTEND_PORT:-13000}:3000"
+    volumes:
+      - ./deploy/inter-rao/frontend.yml:/app/build/config/config.yml:ro
+    depends_on:
+      - astrachat-backend
+
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: astrachat
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD:?Set MONGODB_PASSWORD}
+      MONGO_INITDB_DATABASE: astrachat
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  postgresql:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: astrachat
+      POSTGRES_USER: astrachat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U astrachat -d astrachat"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: astrachat
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+volumes:
+  backend_memory:
+  backend_uploads:
+  backend_logs:
+  mongodb_data:
+  mongodb_config:
+  postgresql_data:
+  minio_data:

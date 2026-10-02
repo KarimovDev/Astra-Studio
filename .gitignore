@@ -1,0 +1,10 @@
+# Deployment secrets and local runtime state
+.env
+.env.*
+!.env.*.example
+**/__pycache__/
+*.pyc
+frontend/node_modules/
+frontend/build/
+/.local/
+/deploy/inter-rao/skill_presentation_v2.md

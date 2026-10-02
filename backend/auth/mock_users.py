@@ -2,6 +2,8 @@
 Mock пользователи для разработки без LDAP
 """
 
+import os
+
 MOCK_USERS = {
     "admin": {
         "user_id": "admin",
@@ -32,6 +34,12 @@ MOCK_USERS = {
     },
 }
 
+# Deployments can override all local-account passwords without committing them.
+for _username, _user in MOCK_USERS.items():
+    _password = os.getenv(f"MOCK_{_username.upper()}_PASSWORD")
+    if _password is not None:
+        _user["password"] = _password
+
 
 def is_mock_user(username: str) -> bool:
     """True для локальных тестовых учёток (admin/user/test)."""
@@ -41,7 +49,7 @@ def is_mock_user(username: str) -> bool:
 def authenticate_mock(username: str, password: str):
     """Mock аутентификация"""
     user = MOCK_USERS.get(username)
-    if not user or user["password"] != password:
+    if not user or not user["password"] or user["password"] != password:
         return None
 
     return {

@@ -232,6 +232,10 @@ async def init_postgresql(
             await _migrate_entity_rag_settings(entity_settings_repo)
             await entity_settings_repo.cleanup_orphans()
 
+            from backend.services.presentation_bootstrap import bootstrap_presentation_agent
+
+            await bootstrap_presentation_agent(postgresql_connection)
+
             if attempt > 1:
                 logger.info("PostgreSQL успешно инициализирован с попытки %s/%s", attempt, max_attempts)
             else:

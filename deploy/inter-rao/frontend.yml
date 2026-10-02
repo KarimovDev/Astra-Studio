@@ -1,0 +1,24 @@
+app:
+  name: Astra Studio — Inter RAO
+  version: "1.0.0"
+  description: Презентации Интер РАО
+  llm_status_poll_seconds: 3600
+  llm_status_poll_trace: false
+  rag_reindex_status_poll_seconds: 3600
+urls:
+  frontend_port: https://astra.karimov-dev.ru
+  backend_port: https://astra.karimov-dev.ru
+  ingress_port: https://astra.karimov-dev.ru
+  llm_service_port: https://astra.karimov-dev.ru
+api:
+  timeout: 30000
+  retryEnabled: true
+  retryAttempts: 3
+  retryDelay: 1000
+websocket:
+  timeout: 10000
+  pingInterval: 30000
+  pingTimeout: 10000
+  reconnectionAttempts: 10
+  reconnectionDelay: 1000
+  reconnectionDelayMax: 5000

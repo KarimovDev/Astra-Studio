@@ -3,6 +3,7 @@ API endpoints для галереи агентов
 """
 
 import asyncio
+import os
 from typing import Annotated, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -65,6 +66,19 @@ async def get_agent_chain_config():
         "default_recursion_limit": get_agent_graph_steps() or DEFAULT_RECURSION_LIMIT,
         "max_recursion_limit": MAX_RECURSION_LIMIT_CAP,
     }
+
+
+@router.get("/default")
+async def get_default_agent(current_user: Annotated[dict, Depends(get_current_user)]):
+    """Optional deployment default; retain the normal agent access checks."""
+    key = os.getenv("DEFAULT_AGENT_KEY", "").strip()
+    if not key:
+        return {"agent": None}
+    repo = get_agent_repository()
+    agent = await repo.get_default_agent(key, current_user["user_id"])
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Агент по умолчанию пока недоступен")
+    return {"agent": agent}
 
 
 @router.get("/tags")
