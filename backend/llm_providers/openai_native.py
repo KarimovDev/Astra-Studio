@@ -13,6 +13,8 @@ OpenAI-совместимый провайдер + несколько особе
 
 from __future__ import annotations
 
+from typing import Any, Dict, Optional
+
 from .base import ProviderCapabilities
 from .openai_compat import OpenAICompatProvider
 
@@ -51,8 +53,13 @@ class OpenRouterProvider(OpenAIProvider):
     #: здесь явно снято: поля мышления отправляются как раньше.
     UNSUPPORTED_REQUEST_EXTRA_KEYS = frozenset()
 
-    def _headers(self, *, accept_sse: bool = False):
-        headers = super()._headers(accept_sse=accept_sse)
+    def _headers(
+        self,
+        *,
+        accept_sse: bool = False,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        headers = super()._headers(accept_sse=accept_sse, payload=payload)
         referer = (self._config.extra or {}).get("http_referer")
         if referer:
             headers["HTTP-Referer"] = str(referer)

@@ -20,7 +20,7 @@ llm_providers:
     extra:
       function_calling: true
       http_referer: https://astra.karimov-dev.ru
-      x_title: Astra Studio — Inter RAO
+      x_title: Astra Studio - Inter RAO
 
 # No local LLM is deployed. Keep only the legacy fields required by older clients.
 llm_service:
