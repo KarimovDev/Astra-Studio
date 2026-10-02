@@ -67,6 +67,8 @@ services:
         REACT_APP_API_URL: https://astra.karimov-dev.ru
         REACT_APP_WS_URL: wss://astra.karimov-dev.ru
         REACT_APP_DEFAULT_AGENT_KEY: inter-rao-presentation-v2
+        FRONTEND_BUILD_NODE_OPTIONS: --max-old-space-size=1536
+        GENERATE_SOURCEMAP: "false"
     restart: unless-stopped
     ports:
       - "127.0.0.1:${ASTRA_FRONTEND_PORT:-13000}:3000"

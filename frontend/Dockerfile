@@ -31,7 +31,9 @@ COPY . .
 RUN node scripts/copy-monaco-assets.js
 
 # Сборка приложения
-RUN npm run build
+ARG FRONTEND_BUILD_NODE_OPTIONS=--max-old-space-size=4096
+ARG GENERATE_SOURCEMAP=true
+RUN NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" GENERATE_SOURCEMAP="$GENERATE_SOURCEMAP" npm run build
 
 # Открытие порта
 EXPOSE 3000
