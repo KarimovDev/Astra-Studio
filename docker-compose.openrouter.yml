@@ -73,10 +73,12 @@ services:
         FRONTEND_BUILD_NODE_OPTIONS: --max-old-space-size=1536
         GENERATE_SOURCEMAP: "false"
     restart: unless-stopped
+    command: ["serve", "-s", "build", "-l", "3000", "-c", "/app/serve.json"]
     ports:
       - "127.0.0.1:${ASTRA_FRONTEND_PORT:-13000}:3000"
     volumes:
       - ./deploy/inter-rao/frontend.yml:/app/build/config/config.yml:ro
+      - ./deploy/inter-rao/serve.json:/app/serve.json:ro
     depends_on:
       - astrachat-backend
 
